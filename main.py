@@ -1,20 +1,20 @@
 import pygame
 from constants import *
 from hex_grid import HexGrid
-from frontline_game import FrontlineGame
+from hex_game import HexGame
 import ui
 
 
-def main():
+def play_game():
     pygame.init()
-    font_bar = pygame.font.SysFont(None, FONT_SIZE_BAR)
-    font_tiles = pygame.font.SysFont(None, FONT_SIZE_TILES)
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Hex Frontline")
+    pygame.display.set_caption("Hex Game")
     clock = pygame.time.Clock()
 
     grid = HexGrid(*HexGrid.compute_grid_size())
-    game = FrontlineGame(grid)
+    font_units = pygame.font.SysFont(None, FONT_SIZE_UNITS)
+    font_bar = pygame.font.SysFont(None, FONT_SIZE_BAR)
+    game = HexGame(grid)
 
     running = True
     while running:
@@ -31,11 +31,11 @@ def main():
                 if cell:
                     game.handle_click(cell.q, cell.r, event.button)
 
-        ui.draw(screen, font_tiles, font_bar, grid, game)
+        ui.draw(screen, font_units, font_bar, grid, game)
         pygame.display.flip()
 
     pygame.quit()
 
 
 if __name__ == "__main__":
-    main()
+    play_game()
