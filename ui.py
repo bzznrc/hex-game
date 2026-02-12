@@ -45,22 +45,23 @@ def draw_bottom_bar(surface, font, grid, game):
         surface, (0, 0, 0), (0, SCREEN_HEIGHT - bar_height, SCREEN_WIDTH, bar_height)
     )
 
-    player_text = "P1" if game.active_player == OWNER_P1 else "P2"
-    p1_area, p2_area = grid.count_control()
+    player_text = "You" if game.active_player == OWNER_PLAYER else "CPU"
+    player_area, cpu_area = grid.count_control()
     if game.phase == PHASE_DEPLOYMENT:
-        phase_info = f"DEP {game.reinforcements_remaining}/{REINFORCEMENTS_PER_PLAYER}"
+        phase_info = f"DEP {game.reinforcements_remaining}/{REINFORCEMENTS_PER_TURN}"
     elif game.phase == PHASE_ATTACK:
         phase_info = f"ATK {game.attacks_used}/{MAX_ATTACKS_PER_TURN}"
     else:
         phase_info = "MOV Units"
 
     parts = [
+        f"Level {game.level}/{game.max_levels}",
         f"Turn {game.turn}",
         f"Player: {player_text}",
         f"Phase: {game.phase}",
         phase_info,
-        f"Area P1: {p1_area}",
-        f"Area P2: {p2_area}",
+        f"Area You: {player_area}",
+        f"Area CPU: {cpu_area}",
     ]
     status_line = "     |     ".join(parts)
 
@@ -170,16 +171,16 @@ def _scaled_hex_points(cache, x, y, radius, scale):
 
 
 def _cell_fill_color(cell):
-    if cell.owner == OWNER_P1:
+    if cell.owner == OWNER_PLAYER:
         return COLOR_P1_DARK
-    if cell.owner == OWNER_P2:
+    if cell.owner == OWNER_CPU:
         return COLOR_P2_DARK
     return COLOR_NEUTRAL_DARK
 
 
 def _owner_accent_color(owner):
-    if owner == OWNER_P1:
+    if owner == OWNER_PLAYER:
         return COLOR_P1_LIGHT
-    if owner == OWNER_P2:
+    if owner == OWNER_CPU:
         return COLOR_P2_LIGHT
     return COLOR_NEUTRAL_LIGHT

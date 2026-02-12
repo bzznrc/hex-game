@@ -129,7 +129,7 @@ class HexGrid:
 
     @staticmethod
     def enemy_of(player):
-        return OWNER_P2 if player == OWNER_P1 else OWNER_P1
+        return OWNER_CPU if player == OWNER_PLAYER else OWNER_PLAYER
 
     def axial_to_pixel(self, q, r):
         radius = self.hex_radius
@@ -262,14 +262,14 @@ class HexGrid:
         return True
 
     def count_control(self):
-        p1 = 0
-        p2 = 0
+        player_cells = 0
+        cpu_cells = 0
         for cell in self.get_all_cells():
-            if cell.owner == OWNER_P1:
-                p1 += 1
-            elif cell.owner == OWNER_P2:
-                p2 += 1
-        return p1, p2
+            if cell.owner == OWNER_PLAYER:
+                player_cells += 1
+            elif cell.owner == OWNER_CPU:
+                cpu_cells += 1
+        return player_cells, cpu_cells
 
     def _generate_ownership_cut_by_row(self):
         target_p1_cells = (self.cols * self.rows) // 2
@@ -344,40 +344,73 @@ class HexGrid:
             cut = self.ownership_cut_by_row[r]
             for q in range(self.cols):
                 cell = self.get_cell(q, r)
-                cell.owner = OWNER_P1 if q <= cut else OWNER_P2
+                cell.owner = OWNER_PLAYER if q <= cut else OWNER_CPU
                 cell.troops[OWNER_P1] = 0
                 cell.troops[OWNER_P2] = 0
 
-    def _rebuild_boundary_edges(self):
-        edges = set()
+    def _is_player_owner(self, owner):
+        return owner in (OWNER_PLAYER, OWNER_CPU)
+
+    def _iter_frontline_edges(self):
         for cell in self.get_all_cells():
+            if not self._is_player_owner(cell.owner):
+                continue
+
             for neighbor in self.get_neighbors(cell.q, cell.r):
+                if not self._is_player_owner(neighbor.owner):
+                    continue
                 if cell.owner == neighbor.owner:
                     continue
+
                 a = (cell.q, cell.r)
                 b = (neighbor.q, neighbor.r)
-                edges.add((a, b) if a < b else (b, a))
-        self.boundary_edges = edges
+                if a < b:
+                    yield (a, b)
+
+    def _rebuild_boundary_edges(self):
+        self.boundary_edges = set(self._iter_frontline_edges())
+
+    def frontline_cells(self, player):
+        cells = set()
+        for a, b in self.boundary_edges:
+            cell_a = self.get_cell(a[0], a[1])
+            cell_b = self.get_cell(b[0], b[1])
+            if cell_a is not None and cell_a.owner == player:
+                cells.add(a)
+            if cell_b is not None and cell_b.owner == player:
+                cells.add(b)
+        return [self.cells[q][r] for (q, r) in sorted(cells)]
 
     def validate_integrity(self):
         for cell in self.get_all_cells():
-            if cell.owner not in (OWNER_P1, OWNER_P2, OWNER_NEUTRAL):
+            if cell.owner not in (OWNER_PLAYER, OWNER_CPU, OWNER_NEUTRAL):
                 raise ValueError(f"Invalid owner at ({cell.q},{cell.r}): {cell.owner}")
 
-            p1 = cell.troops[OWNER_P1]
-            p2 = cell.troops[OWNER_P2]
-            if p1 < 0 or p2 < 0:
-                raise ValueError(f"Negative troops at ({cell.q},{cell.r}): p1={p1}, p2={p2}")
-            if p1 > MAX_TROOPS_PER_CELL or p2 > MAX_TROOPS_PER_CELL:
-                raise ValueError(f"Per-side max exceeded at ({cell.q},{cell.r}): p1={p1}, p2={p2}")
-            if p1 + p2 > MAX_TROOPS_PER_CELL:
-                raise ValueError(f"Cell max exceeded at ({cell.q},{cell.r}): total={p1+p2}")
+            player_troops = cell.troops[OWNER_PLAYER]
+            cpu_troops = cell.troops[OWNER_CPU]
+            if player_troops < 0 or cpu_troops < 0:
+                raise ValueError(
+                    f"Negative troops at ({cell.q},{cell.r}): "
+                    f"player={player_troops}, cpu={cpu_troops}"
+                )
+            if player_troops > MAX_TROOPS_PER_CELL or cpu_troops > MAX_TROOPS_PER_CELL:
+                raise ValueError(
+                    f"Per-side max exceeded at ({cell.q},{cell.r}): "
+                    f"player={player_troops}, cpu={cpu_troops}"
+                )
+            if player_troops + cpu_troops > MAX_TROOPS_PER_CELL:
+                raise ValueError(
+                    f"Cell max exceeded at ({cell.q},{cell.r}): "
+                    f"total={player_troops + cpu_troops}"
+                )
 
-            if cell.owner == OWNER_P1 and p2 != 0:
-                raise ValueError(f"Enemy troops on P1 cell ({cell.q},{cell.r}): p2={p2}")
-            if cell.owner == OWNER_P2 and p1 != 0:
-                raise ValueError(f"Enemy troops on P2 cell ({cell.q},{cell.r}): p1={p1}")
-            if cell.owner == OWNER_NEUTRAL and (p1 != 0 or p2 != 0):
+            if cell.owner == OWNER_PLAYER and cpu_troops != 0:
+                raise ValueError(f"Enemy troops on Player cell ({cell.q},{cell.r}): cpu={cpu_troops}")
+            if cell.owner == OWNER_CPU and player_troops != 0:
+                raise ValueError(
+                    f"Enemy troops on CPU cell ({cell.q},{cell.r}): player={player_troops}"
+                )
+            if cell.owner == OWNER_NEUTRAL and (player_troops != 0 or cpu_troops != 0):
                 raise ValueError(f"Troops on neutral cell ({cell.q},{cell.r})")
 
         for (a, b) in self.boundary_edges:
@@ -389,6 +422,10 @@ class HexGrid:
                 raise ValueError("Boundary edge references non-adjacent cells")
             if c1.owner == c2.owner:
                 raise ValueError("Boundary edge references same-owner cells")
+
+        expected_frontline = set(self._iter_frontline_edges())
+        if self.boundary_edges != expected_frontline:
+            raise ValueError("Boundary edges out of sync with enemy-adjacent cells")
 
     def _generate_terrain(self):
         self._generate_rivers()

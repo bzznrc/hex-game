@@ -18,7 +18,7 @@ def play_game():
 
     running = True
     while running:
-        clock.tick(FPS)
+        dt_seconds = clock.tick(FPS) / 1000.0
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -31,6 +31,7 @@ def play_game():
                 if cell:
                     game.handle_click(cell.q, cell.r, event.button)
 
+        game.update(dt_seconds)
         ui.draw(screen, font_units, font_bar, grid, game)
         pygame.display.flip()
 
