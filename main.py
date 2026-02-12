@@ -8,12 +8,14 @@ import ui
 def play_game():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Hex Game")
+    pygame.display.set_caption(WINDOW_TITLE)
     clock = pygame.time.Clock()
 
     grid = HexGrid(*HexGrid.compute_grid_size())
-    font_units = pygame.font.SysFont(None, FONT_SIZE_UNITS)
-    font_bar = pygame.font.SysFont(None, FONT_SIZE_BAR)
+    font_units = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_UNITS)
+    font_bar = pygame.font.SysFont(FONT_NAME_BAR, FONT_SIZE_BAR)
+    font_terrain = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_TERRAIN)
+    font_terrain_tag = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_TERRAIN_TAG)
     game = HexGame(grid)
 
     running = True
@@ -32,7 +34,7 @@ def play_game():
                     game.handle_click(cell.q, cell.r, event.button)
 
         game.update(dt_seconds)
-        ui.draw(screen, font_units, font_bar, grid, game)
+        ui.draw(screen, font_units, font_bar, font_terrain, font_terrain_tag, grid, game)
         pygame.display.flip()
 
     pygame.quit()

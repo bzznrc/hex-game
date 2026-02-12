@@ -1,0 +1,2 @@
+split rivers
+rivers as edges and not cells

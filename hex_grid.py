@@ -1,5 +1,6 @@
 import math
 import random
+import heapq
 from constants import *
 
 
@@ -52,6 +53,8 @@ class HexGrid:
         self.ownership_cut_by_row = self._generate_ownership_cut_by_row()
         # Runtime boundary representation: edges between opposing neighbors.
         self.boundary_edges = set()
+        # River representation: edges between adjacent cells.
+        self.river_edges = set()
 
         self._assign_side_ownership_from_cut()
         self._rebuild_boundary_edges()
@@ -164,20 +167,38 @@ class HexGrid:
     def are_adjacent(self, q1, r1, q2, r2):
         return any(n.q == q2 and n.r == r2 for n in self.get_neighbors(q1, r1))
 
+    @staticmethod
+    def _edge_key(a, b):
+        return (a, b) if a < b else (b, a)
+
     def add_troop(self, q, r, player):
+        return self.add_troops(q, r, player, 1)
+
+    def add_troops(self, q, r, player, count):
+        count = int(count)
+        if count <= 0:
+            return False
+
         cell = self.get_cell(q, r)
-        if cell is None:
+        if not self.can_deploy_to_cell(q, r, player):
             return False
-        if cell.owner != player:
+        if cell.total_troops() + count > MAX_TROOPS_PER_CELL:
             return False
-        if cell.total_troops() >= MAX_TROOPS_PER_CELL:
+
+        cell.troops[player] += count
+        self.validate_integrity()
+        return True
+
+    def can_deploy_to_cell(self, q, r, player):
+        cell = self.get_cell(q, r)
+        if cell is None or cell.owner != player:
             return False
+
         enemy = self.enemy_of(player)
         if cell.troops[enemy] > 0:
             return False
 
-        cell.troops[player] += 1
-        self.validate_integrity()
+        # "On or behind the frontline" maps to all friendly cells in this ownership model.
         return True
 
     def transfer_troop(self, source_q, source_r, target_q, target_r, player):
@@ -216,6 +237,11 @@ class HexGrid:
         if target.owner != defender:
             return False
         if source.troops[attacker] <= 0:
+            return False
+        attack_dice = min(3, source.troops[attacker])
+        if self.has_river_between(source_q, source_r, target_q, target_r):
+            attack_dice -= 1
+        if attack_dice <= 0:
             return False
         return True
 
@@ -381,6 +407,46 @@ class HexGrid:
                 cells.add(b)
         return [self.cells[q][r] for (q, r) in sorted(cells)]
 
+    def has_river_between(self, q1, r1, q2, r2):
+        edge = self._edge_key((q1, r1), (q2, r2))
+        return edge in self.river_edges
+
+    def is_frontline_cell(self, q, r):
+        cell = self.get_cell(q, r)
+        if cell is None or not self._is_player_owner(cell.owner):
+            return False
+
+        enemy = self.enemy_of(cell.owner)
+        return any(neighbor.owner == enemy for neighbor in self.get_neighbors(q, r))
+
+    def friendly_adjacent_count(self, q, r):
+        cell = self.get_cell(q, r)
+        if cell is None or not self.is_frontline_cell(q, r):
+            return 0
+
+        owner = cell.owner
+        count = 0
+        for neighbor in self.get_neighbors(q, r):
+            if neighbor.owner == owner:
+                count += 1
+        return count
+
+    def frontline_topology(self, q, r):
+        if not self.is_frontline_cell(q, r):
+            return None
+
+        if self.friendly_adjacent_count(q, r) >= 2:
+            return "supported"
+        return "exposed"
+
+    def defense_topology_modifier(self, q, r):
+        topology = self.frontline_topology(q, r)
+        if topology == "supported":
+            return 1
+        if topology == "exposed":
+            return -1
+        return 0
+
     def validate_integrity(self):
         for cell in self.get_all_cells():
             if cell.owner not in (OWNER_PLAYER, OWNER_CPU, OWNER_NEUTRAL):
@@ -427,100 +493,267 @@ class HexGrid:
         if self.boundary_edges != expected_frontline:
             raise ValueError("Boundary edges out of sync with enemy-adjacent cells")
 
+        for (a, b) in self.river_edges:
+            c1 = self.get_cell(a[0], a[1])
+            c2 = self.get_cell(b[0], b[1])
+            if c1 is None or c2 is None:
+                raise ValueError("River edge references invalid cell")
+            if not self.are_adjacent(c1.q, c1.r, c2.q, c2.r):
+                raise ValueError("River edge references non-adjacent cells")
+
     def _generate_terrain(self):
         self._generate_rivers()
+        self._generate_forests()
         self._generate_mountains()
 
     def _generate_rivers(self):
+        self.river_edges = set()
         min_rivers = max(0, int(MIN_RIVERS))
         max_rivers = max(min_rivers, int(MAX_RIVERS))
         river_count = random.randint(min_rivers, max_rivers)
+        if river_count <= 0:
+            return
+
+        river_graph = self._build_river_graph()
+        if river_graph is None:
+            return
+
+        target_min_length = max(1, min(self.cols, self.rows) - 1)
         attempts = 0
         created = 0
 
-        while created < river_count and attempts < max(8, river_count * 10):
+        while created < river_count and attempts < max(12, river_count * 24):
             attempts += 1
-            path = self._build_edge_to_edge_river()
-            if not path:
+            path_edges = self._build_edge_to_edge_river(
+                river_graph,
+                min_length=target_min_length,
+            )
+            if not path_edges:
                 continue
-            for q, r in path:
-                self.cells[q][r].terrain = TERRAIN_RIVER
+            self.river_edges.update(path_edges)
             created += 1
 
-    def _build_edge_to_edge_river(self):
-        def is_valid_river_cell(q, r):
-            return self.get_cell(q, r) is not None and self.cells[q][r].terrain != TERRAIN_RIVER
+    @staticmethod
+    def _vertex_key(x, y):
+        scale = 1000
+        return (int(round(x * scale)), int(round(y * scale)))
 
-        # Build a one-cell-thick edge-to-edge line that always advances on one main axis.
-        # This keeps a meandering shape but prevents local triangular river blobs.
-        def build_left_right():
-            for _ in range(24):
-                q = 0
-                r = random.randint(0, self.rows - 1)
-                if not is_valid_river_cell(q, r):
-                    continue
+    @staticmethod
+    def _vertex_distance_sq(a, b):
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return dx * dx + dy * dy
 
-                path = [(q, r)]
-                turned = False
+    def _cell_vertex_keys(self, q, r):
+        x, y = self.axial_to_pixel(q, r)
+        vertices = []
+        for i in range(6):
+            angle = math.radians(60 * i)
+            vx = x + self.hex_radius * math.cos(angle)
+            vy = y + self.hex_radius * math.sin(angle)
+            vertices.append(self._vertex_key(vx, vy))
+        return tuple(vertices)
 
-                while q < self.cols - 1:
-                    forward = [
-                        n for n in self.get_neighbors(q, r)
-                        if n.q == q + 1 and is_valid_river_cell(n.q, n.r)
-                    ]
-                    if not forward:
-                        break
-                    chosen = random.choice(forward)
-                    if chosen.r != r:
-                        turned = True
-                    q, r = chosen.q, chosen.r
-                    path.append((q, r))
+    def _build_river_graph(self):
+        cell_vertices = {}
+        side_counts = {}
 
-                if q == self.cols - 1 and (turned or self.cols <= 2):
-                    return path
+        for cell in self.get_all_cells():
+            coord = (cell.q, cell.r)
+            vertices = self._cell_vertex_keys(cell.q, cell.r)
+            cell_vertices[coord] = vertices
+            for i in range(6):
+                side = self._edge_key(vertices[i], vertices[(i + 1) % 6])
+                side_counts[side] = side_counts.get(side, 0) + 1
+
+        boundary_vertices = set()
+        for side, count in side_counts.items():
+            if count == 1:
+                boundary_vertices.update(side)
+        if not boundary_vertices:
             return None
 
-        def build_top_bottom():
-            for _ in range(24):
-                q = random.randint(0, self.cols - 1)
-                r = 0
-                if not is_valid_river_cell(q, r):
+        edge_vertices = {}
+        vertex_graph = {}
+        for cell in self.get_all_cells():
+            a = (cell.q, cell.r)
+            shared_candidates = set(cell_vertices[a])
+            for neighbor in self.get_neighbors(cell.q, cell.r):
+                b = (neighbor.q, neighbor.r)
+                edge = self._edge_key(a, b)
+                if edge in edge_vertices:
                     continue
-
-                path = [(q, r)]
-                turned = False
-
-                while r < self.rows - 1:
-                    forward = [
-                        n for n in self.get_neighbors(q, r)
-                        if n.r == r + 1 and is_valid_river_cell(n.q, n.r)
-                    ]
-                    if not forward:
-                        break
-                    chosen = random.choice(forward)
-                    if chosen.q != q:
-                        turned = True
-                    q, r = chosen.q, chosen.r
-                    path.append((q, r))
-
-                if r == self.rows - 1 and (turned or self.rows <= 2):
-                    return path
+                shared_vertices = tuple(sorted(shared_candidates.intersection(cell_vertices[b])))
+                if len(shared_vertices) != 2:
+                    continue
+                v1, v2 = shared_vertices
+                edge_vertices[edge] = (v1, v2)
+                vertex_graph.setdefault(v1, []).append((v2, edge))
+                vertex_graph.setdefault(v2, []).append((v1, edge))
+        if not edge_vertices:
             return None
 
-        if random.choice(["left_right", "top_bottom"]) == "left_right":
-            path = build_left_right()
-            if path:
-                return path
-            return build_top_bottom()
+        reachable_boundary_vertices = [
+            vertex for vertex in boundary_vertices if vertex in vertex_graph
+        ]
+        if len(reachable_boundary_vertices) < 2:
+            return None
 
-        path = build_top_bottom()
-        if path:
-            return path
-        return build_left_right()
+        xs = [vertex[0] for vertex in reachable_boundary_vertices]
+        ys = [vertex[1] for vertex in reachable_boundary_vertices]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        tolerance = max(1, int(round(self.hex_radius * 300)))
+
+        side_vertices = {"left": [], "right": [], "top": [], "bottom": []}
+        for vertex in reachable_boundary_vertices:
+            x, y = vertex
+            if abs(x - min_x) <= tolerance:
+                side_vertices["left"].append(vertex)
+            if abs(x - max_x) <= tolerance:
+                side_vertices["right"].append(vertex)
+            if abs(y - min_y) <= tolerance:
+                side_vertices["top"].append(vertex)
+            if abs(y - max_y) <= tolerance:
+                side_vertices["bottom"].append(vertex)
+
+        return {
+            "vertex_graph": vertex_graph,
+            "boundary_vertices": tuple(reachable_boundary_vertices),
+            "side_vertices": side_vertices,
+        }
+
+    def _pick_boundary_endpoints(self, side_vertices, boundary_vertices):
+        axis_pairs = [("left", "right"), ("top", "bottom")]
+        random.shuffle(axis_pairs)
+
+        for side_a, side_b in axis_pairs:
+            start_pool = side_vertices.get(side_a, [])
+            end_pool = side_vertices.get(side_b, [])
+            if not start_pool or not end_pool:
+                continue
+            start = random.choice(start_pool)
+            ranked = sorted(
+                end_pool,
+                key=lambda v: self._vertex_distance_sq(start, v),
+                reverse=True,
+            )
+            candidate_count = min(8, len(ranked))
+            end = random.choice(ranked[:candidate_count])
+            if start != end:
+                return start, end
+
+        all_boundary_vertices = list(boundary_vertices)
+        if len(all_boundary_vertices) < 2:
+            return None
+        start = random.choice(all_boundary_vertices)
+        ranked = sorted(
+            all_boundary_vertices,
+            key=lambda v: self._vertex_distance_sq(start, v),
+            reverse=True,
+        )
+        for end in ranked:
+            if start != end:
+                return start, end
+        return None
+
+    def _find_vertex_path(self, start_vertex, end_vertex, vertex_graph):
+        if start_vertex == end_vertex:
+            return None
+
+        frontier = [(0.0, start_vertex)]
+        best_cost = {start_vertex: 0.0}
+        previous = {}
+
+        while frontier:
+            cost, vertex = heapq.heappop(frontier)
+            if cost > best_cost.get(vertex, float("inf")):
+                continue
+            if vertex == end_vertex:
+                break
+
+            for neighbor, edge in vertex_graph.get(vertex, []):
+                step_cost = 1.0 + random.random() * 0.35
+                if edge in self.river_edges:
+                    step_cost += 2.5
+                next_cost = cost + step_cost
+                if next_cost >= best_cost.get(neighbor, float("inf")):
+                    continue
+                best_cost[neighbor] = next_cost
+                previous[neighbor] = (vertex, edge)
+                heapq.heappush(frontier, (next_cost, neighbor))
+
+        if end_vertex not in previous:
+            return None
+
+        path_edges = []
+        cursor = end_vertex
+        while cursor != start_vertex:
+            prev = previous.get(cursor)
+            if prev is None:
+                return None
+            prev_vertex, edge = prev
+            path_edges.append(edge)
+            cursor = prev_vertex
+        path_edges.reverse()
+        return path_edges
+
+    def _build_edge_to_edge_river(self, river_graph, min_length):
+        vertex_graph = river_graph["vertex_graph"]
+        boundary_vertices = river_graph["boundary_vertices"]
+        side_vertices = river_graph["side_vertices"]
+
+        for _ in range(28):
+            endpoints = self._pick_boundary_endpoints(side_vertices, boundary_vertices)
+            if endpoints is None:
+                return None
+            start_vertex, end_vertex = endpoints
+            path_edges = self._find_vertex_path(start_vertex, end_vertex, vertex_graph)
+            if not path_edges:
+                continue
+            if len(path_edges) < min_length:
+                continue
+            if not any(edge not in self.river_edges for edge in path_edges):
+                continue
+            return path_edges
+
+        for _ in range(12):
+            endpoints = self._pick_boundary_endpoints(side_vertices, boundary_vertices)
+            if endpoints is None:
+                return None
+            start_vertex, end_vertex = endpoints
+            path_edges = self._find_vertex_path(start_vertex, end_vertex, vertex_graph)
+            if not path_edges:
+                continue
+            if any(edge not in self.river_edges for edge in path_edges):
+                return path_edges
+        return None
 
     def _generate_mountains(self):
-        min_clusters = max(0, int(MIN_MOUNTAIN_CLUSTERS))
-        max_clusters = max(min_clusters, int(MAX_MOUNTAIN_CLUSTERS))
+        self._generate_clustered_terrain(
+            MIN_MOUNTAIN_CLUSTERS,
+            MAX_MOUNTAIN_CLUSTERS,
+            MAX_MOUNTAINS_PER_CLUSTER,
+            TERRAIN_MOUNTAIN,
+        )
+
+    def _generate_forests(self):
+        self._generate_clustered_terrain(
+            MIN_FOREST_CLUSTERS,
+            MAX_FOREST_CLUSTERS,
+            MAX_FORESTS_PER_CLUSTER,
+            TERRAIN_FOREST,
+        )
+
+    def _generate_clustered_terrain(
+        self,
+        min_clusters,
+        max_clusters,
+        max_tiles_per_cluster,
+        terrain_type,
+    ):
+        min_clusters = max(0, int(min_clusters))
+        max_clusters = max(min_clusters, int(max_clusters))
         cluster_count = random.randint(min_clusters, max_clusters)
         candidates = [c for c in self.get_all_cells() if c.terrain == TERRAIN_PLAIN]
         random.shuffle(candidates)
@@ -531,11 +764,11 @@ class HexGrid:
                 break
             if seed.terrain != TERRAIN_PLAIN:
                 continue
-            cluster_size = random.randint(1, MAX_MOUNTAINS_PER_CLUSTER)
-            self._grow_mountain_cluster(seed, cluster_size)
+            cluster_size = random.randint(1, int(max_tiles_per_cluster))
+            self._grow_terrain_cluster(seed, cluster_size, terrain_type)
             created += 1
 
-    def _grow_mountain_cluster(self, seed, target_size):
+    def _grow_terrain_cluster(self, seed, target_size, terrain_type):
         frontier = [seed]
         placed = 0
 
@@ -544,7 +777,7 @@ class HexGrid:
             if cell.terrain != TERRAIN_PLAIN:
                 continue
 
-            cell.terrain = TERRAIN_MOUNTAIN
+            cell.terrain = terrain_type
             placed += 1
 
             neighbors = self.get_neighbors(cell.q, cell.r)
