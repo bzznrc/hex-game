@@ -1,4 +1,5 @@
 import pygame
+import os
 from constants import *
 from hex_grid import HexGrid
 from hex_game import HexGame
@@ -12,10 +13,12 @@ def play_game():
     clock = pygame.time.Clock()
 
     grid = HexGrid(*HexGrid.compute_grid_size())
-    font_units = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_UNITS)
-    font_bar = pygame.font.SysFont(FONT_NAME_BAR, FONT_SIZE_BAR)
-    font_terrain = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_TERRAIN)
-    font_terrain_tag = pygame.font.SysFont(FONT_NAME_UNITS, FONT_SIZE_TERRAIN_TAG)
+    base_dir = os.path.dirname(__file__)
+    roboto_path = os.path.join(base_dir, FONT_PATH_REGULAR)
+    font_units = pygame.font.Font(roboto_path, FONT_SIZE_UNITS)
+    font_bar = pygame.font.Font(roboto_path, FONT_SIZE_BAR)
+    font_terrain_tag = pygame.font.Font(roboto_path, FONT_SIZE_TERRAIN_TAG)
+    icon_assets = ui.load_icon_assets(grid.hex_radius, base_dir)
     game = HexGame(grid)
 
     running = True
@@ -34,7 +37,7 @@ def play_game():
                     game.handle_click(cell.q, cell.r, event.button)
 
         game.update(dt_seconds)
-        ui.draw(screen, font_units, font_bar, font_terrain, font_terrain_tag, grid, game)
+        ui.draw(screen, font_units, font_bar, font_terrain_tag, icon_assets, grid, game)
         pygame.display.flip()
 
     pygame.quit()

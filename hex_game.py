@@ -14,6 +14,7 @@ class HexGame:
 
         self.selected_source = None
         self.deploy_chunks_remaining = DEPLOY_CHUNKS_PER_TURN
+        self.deploy_placements = {}
         self.attacks_used = 0
         self.last_combat_log = []
         self.cpu_action_delay = float(CPU_ACTION_DELAY_SECONDS)
@@ -54,6 +55,28 @@ class HexGame:
         if not self.grid.add_troops(q, r, self.active_player, UNITS_PER_DEPLOY_CHUNK):
             return False
         self.deploy_chunks_remaining -= 1
+        coord = (q, r)
+        self.deploy_placements[coord] = self.deploy_placements.get(coord, 0) + 1
+        return True
+
+    def undo_deploy_chunk_from(self, q, r):
+        if self.phase != PHASE_DEPLOYMENT:
+            return False
+        coord = (q, r)
+        placed_chunks = self.deploy_placements.get(coord, 0)
+        if placed_chunks <= 0:
+            return False
+        if not self.grid.remove_troops(q, r, self.active_player, UNITS_PER_DEPLOY_CHUNK):
+            return False
+
+        if placed_chunks == 1:
+            del self.deploy_placements[coord]
+        else:
+            self.deploy_placements[coord] = placed_chunks - 1
+        self.deploy_chunks_remaining = min(
+            DEPLOY_CHUNKS_PER_TURN,
+            self.deploy_chunks_remaining + 1,
+        )
         return True
 
     def attack_selected_to(self, q, r):
@@ -85,6 +108,7 @@ class HexGame:
             if self.deploy_chunks_remaining > 0:
                 return
             self.phase = PHASE_ATTACK
+            self.deploy_placements = {}
             self.attacks_used = 0
             self.last_combat_log = []
             return
@@ -119,6 +143,7 @@ class HexGame:
 
         self.phase = PHASE_DEPLOYMENT
         self.deploy_chunks_remaining = DEPLOY_CHUNKS_PER_TURN
+        self.deploy_placements = {}
         self.attacks_used = 0
         self.last_combat_log = []
         self.clear_selection()
@@ -137,31 +162,42 @@ class HexGame:
 
         attacker_troops = source.troops_of(attacker)
         defender_troops = target.troops_of(defender)
+        start_attacker_troops = attacker_troops
+        start_defender_troops = defender_troops
         crossing_river = self._is_river_crossing(source, target)
         topology = self.grid.frontline_topology(target.q, target.r)
 
         attacker_label = self._side_name(attacker)
         defender_label = self._side_name(defender)
         self._log(
-            f"[COMBAT] TURN={self.turn} ATTACKER={attacker_label} DEFENDER={defender_label} "
-            f"SRC=({source_q},{source_r}) TGT=({target_q},{target_r})"
+            f"Attack: {attacker_label} -> {defender_label} / "
+            f"Src: [{source_q},{source_r}] & Tgt: [{target_q},{target_r}]"
         )
-        self._log(f"[STATE] START_A={attacker_troops} START_D={defender_troops}")
-        self._log_combat_context(crossing_river, target.terrain, topology)
+        self._log("Modifiers:")
+        modifier_lines = self._combat_modifier_lines(crossing_river, target.terrain, topology)
+        if not modifier_lines:
+            self._log("  - None")
+        else:
+            for line in modifier_lines:
+                self._log(f"  - {line}")
 
+        self._log("Turns:")
+        rounds_logged = 0
         round_idx = 1
         while attacker_troops > 0 and defender_troops > 0:
             attacker_dice = min(3, attacker_troops)
             if crossing_river:
                 attacker_dice -= 1
             if attacker_dice <= 0:
-                self._log(f"[ROUND {round_idx}] STOP=NO_ATTACK_DICE")
+                self._log(f"  - T{round_idx}: Stop (no attack dice)")
+                rounds_logged += 1
                 break
 
             defender_dice = self._defender_dice(defender_troops, target.terrain, topology)
             if defender_dice <= 0:
                 defender_troops = 0
-                self._log(f"[ROUND {round_idx}] STOP=NO_DEFENSE_DICE")
+                self._log(f"  - T{round_idx}: Stop (no defense dice)")
+                rounds_logged += 1
                 break
 
             attacker_rolls = sorted((random.randint(1, 6) for _ in range(attacker_dice)), reverse=True)
@@ -178,12 +214,16 @@ class HexGame:
                     attacker_losses += 1
 
             self._log(
-                f"[ROUND {round_idx}] AD={attacker_dice} DD={defender_dice} "
-                f"A_ROLLS={attacker_rolls} D_ROLLS={defender_rolls} "
-                f"LOSS_A={attacker_losses} LOSS_D={defender_losses} "
-                f"REM_A={attacker_troops} REM_D={defender_troops}"
+                f"  - T{round_idx}: AD {attacker_dice} {attacker_rolls} | "
+                f"DD {defender_dice} {defender_rolls} | "
+                f"Loss {attacker_losses}-{defender_losses} | "
+                f"Rem {attacker_troops}-{defender_troops}"
             )
+            rounds_logged += 1
             round_idx += 1
+
+        if rounds_logged == 0:
+            self._log("  - None")
 
         if not self.grid.apply_attack_result(
             source_q,
@@ -196,13 +236,12 @@ class HexGame:
         ):
             return False
 
-        if defender_troops == 0 and attacker_troops > 0:
-            self._log(f"[RESULT] WINNER=ATTACKER OUTCOME=CAPTURE FINAL_A={attacker_troops} FINAL_D=0")
-        else:
-            self._log(
-                f"[RESULT] WINNER=DEFENDER OUTCOME=HOLD FINAL_A={attacker_troops} "
-                f"FINAL_D={defender_troops}"
-            )
+        outcome = "Win" if defender_troops == 0 and attacker_troops > 0 else "Loss"
+        self._log(
+            f"Result: {outcome} / "
+            f"Start: {start_attacker_troops}-{start_defender_troops} / "
+            f"End: {attacker_troops}-{defender_troops}"
+        )
         return True
 
     def _is_river_crossing(self, source_cell, target_cell):
@@ -213,28 +252,22 @@ class HexGame:
             target_cell.r,
         )
 
-    def _log_combat_context(self, crossing_river, defender_terrain, topology):
+    def _combat_modifier_lines(self, crossing_river, defender_terrain, topology):
+        lines = []
+        if crossing_river:
+            lines.append("River: Attack Dice -1")
         if defender_terrain == TERRAIN_FOREST:
-            self._log("[TERRAIN] FOREST=HIDDEN_UNITS_ONLY COMBAT_EFFECT=NONE")
-
-        river_mod = -1 if crossing_river else 0
-        self._log(f"[RIVER] ATTACK_DICE_MOD={river_mod}")
-
-        if defender_terrain == TERRAIN_MOUNTAIN:
-            if topology == "supported":
-                self._log("[DEFENSE] TOPOLOGY=SUPPORTED(+1D) MOUNTAIN=+1D TOTAL_MOD=+2D")
-            elif topology == "exposed":
-                self._log("[DEFENSE] TOPOLOGY=EXPOSED(REPLACED_BY_MOUNTAIN) MOUNTAIN=+1D TOTAL_MOD=+1D")
-            else:
-                self._log("[DEFENSE] TOPOLOGY=NONE MOUNTAIN=+1D TOTAL_MOD=+1D")
-            return
-
+            lines.append("Forest: Hidden units")
         if topology == "supported":
-            self._log("[DEFENSE] TOPOLOGY=SUPPORTED(+1D) TOTAL_MOD=+1D")
+            lines.append("Topology - Supported: Defense Dice +1")
         elif topology == "exposed":
-            self._log("[DEFENSE] TOPOLOGY=EXPOSED(-1D) TOTAL_MOD=-1D")
-        else:
-            self._log("[DEFENSE] TOPOLOGY=NONE TOTAL_MOD=0")
+            if defender_terrain == TERRAIN_MOUNTAIN:
+                lines.append("Topology - Exposed: Neutralized by Mountain")
+            else:
+                lines.append("Topology - Exposed: Defense Dice -1")
+        if defender_terrain == TERRAIN_MOUNTAIN:
+            lines.append("Mountain: Defense Dice +1")
+        return lines
 
     def _defender_dice(self, defender_troops, defender_terrain, topology):
         base = min(2, defender_troops)
@@ -263,6 +296,8 @@ class HexGame:
             return
 
         if button == 3:
+            if self.phase == PHASE_DEPLOYMENT:
+                self.undo_deploy_chunk_from(q, r)
             self.clear_selection()
             return
 
@@ -409,4 +444,4 @@ class HexGame:
 
     @staticmethod
     def _side_name(owner):
-        return "PLAYER" if owner == OWNER_PLAYER else "CPU"
+        return "You" if owner == OWNER_PLAYER else "CPU"

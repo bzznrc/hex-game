@@ -55,6 +55,8 @@ class HexGrid:
         self.boundary_edges = set()
         # River representation: edges between adjacent cells.
         self.river_edges = set()
+        # Cached coordinates of cells in fully encircled owner groups.
+        self._encircled_cells_cache = None
 
         self._assign_side_ownership_from_cut()
         self._rebuild_boundary_edges()
@@ -186,6 +188,25 @@ class HexGrid:
             return False
 
         cell.troops[player] += count
+        self.validate_integrity()
+        return True
+
+    def remove_troops(self, q, r, player, count):
+        count = int(count)
+        if count <= 0:
+            return False
+
+        cell = self.get_cell(q, r)
+        if cell is None or cell.owner != player:
+            return False
+
+        enemy = self.enemy_of(player)
+        if cell.troops[enemy] > 0:
+            return False
+        if cell.troops[player] < count:
+            return False
+
+        cell.troops[player] -= count
         self.validate_integrity()
         return True
 
@@ -395,6 +416,7 @@ class HexGrid:
 
     def _rebuild_boundary_edges(self):
         self.boundary_edges = set(self._iter_frontline_edges())
+        self._encircled_cells_cache = None
 
     def frontline_cells(self, player):
         cells = set()
@@ -431,7 +453,58 @@ class HexGrid:
                 count += 1
         return count
 
+    def is_encircled_cell(self, q, r):
+        cell = self.get_cell(q, r)
+        if cell is None or not self._is_player_owner(cell.owner):
+            return False
+        return (q, r) in self._encircled_cells()
+
+    def _encircled_cells(self):
+        if self._encircled_cells_cache is not None:
+            return self._encircled_cells_cache
+
+        encircled = set()
+        visited = set()
+        for cell in self.get_all_cells():
+            start = (cell.q, cell.r)
+            if start in visited or not self._is_player_owner(cell.owner):
+                continue
+
+            owner = cell.owner
+            enemy = self.enemy_of(owner)
+            group = set()
+            stack = [start]
+            visited.add(start)
+            surrounded = True
+
+            while stack:
+                q, r = stack.pop()
+                group.add((q, r))
+                neighbors = self.get_neighbors(q, r)
+
+                # Border contact means the group is not fully enclosed by enemies.
+                if len(neighbors) < 6:
+                    surrounded = False
+
+                for neighbor in neighbors:
+                    coord = (neighbor.q, neighbor.r)
+                    if neighbor.owner == owner:
+                        if coord not in visited:
+                            visited.add(coord)
+                            stack.append(coord)
+                    elif neighbor.owner != enemy:
+                        surrounded = False
+
+            if surrounded:
+                encircled.update(group)
+
+        self._encircled_cells_cache = encircled
+        return encircled
+
     def frontline_topology(self, q, r):
+        if self.is_encircled_cell(q, r):
+            return "exposed"
+
         if not self.is_frontline_cell(q, r):
             return None
 

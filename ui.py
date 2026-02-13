@@ -1,8 +1,25 @@
+import os
 import pygame
 from math import pi, cos, sin, hypot
 from constants import *
 
-def draw(surface, font_units, font_bar, font_terrain, font_terrain_tag, grid, game):
+
+_ICON_CACHE = {}
+
+
+def load_icon_assets(hex_radius, base_dir):
+    terrain_size = _scaled_icon_size(hex_radius, UI_TERRAIN_ICON_SIZE_SCALE)
+    danger_size = _scaled_icon_size(hex_radius, UI_EXPOSED_ICON_SIZE_SCALE)
+    return {
+        "terrain": {
+            TERRAIN_FOREST: _load_icon(os.path.join(base_dir, ICON_PATH_FOREST), terrain_size),
+            TERRAIN_MOUNTAIN: _load_icon(os.path.join(base_dir, ICON_PATH_MOUNTAIN), terrain_size),
+        },
+        "danger": _load_icon(os.path.join(base_dir, ICON_PATH_DANGER), danger_size),
+    }
+
+
+def draw(surface, font_units, font_bar, font_terrain_tag, icon_assets, grid, game):
     surface.fill(COLOR_BACKGROUND)
     cache = {}
     radius = grid.hex_radius
@@ -16,8 +33,8 @@ def draw(surface, font_units, font_bar, font_terrain, font_terrain_tag, grid, ga
         x, y = grid.axial_to_pixel(cell.q, cell.r)
         points = _hex_points(cache, x, y, radius)
         pygame.draw.polygon(surface, _cell_fill_color(cell), points)
-        _draw_terrain_marker(surface, font_terrain, cell, x, y, radius)
-        _draw_topology(surface, grid, cell, x, y, radius)
+        _draw_terrain_marker(surface, icon_assets, cell, x, y, radius)
+        _draw_topology(surface, icon_assets, grid, cell, x, y, radius)
 
     for cell in grid.get_all_cells():
         x, y = grid.axial_to_pixel(cell.q, cell.r)
@@ -46,32 +63,12 @@ def draw_bottom_bar(surface, font, grid, game):
 
     player_text = "You" if game.active_player == OWNER_PLAYER else "CPU"
     player_area, cpu_area = grid.count_control()
-    if game.phase == PHASE_DEPLOYMENT:
-        phase_info = (
-            f"DEP {game.deploy_chunks_remaining}/{DEPLOY_CHUNKS_PER_TURN}"
-            f" x{UNITS_PER_DEPLOY_CHUNK}"
-        )
-    elif game.phase == PHASE_ATTACK:
-        phase_info = f"ATK {game.attacks_used}/{MAX_ATTACKS_PER_TURN}"
-    else:
-        phase_info = "MOV Units"
-
-    parts = [
-        f"Level {game.level}/{game.max_levels}",
-        f"Turn {game.turn}",
-        f"Player: {player_text}",
-        f"Phase: {game.phase}",
-        phase_info,
-        f"Area You: {player_area}",
-        f"Area CPU: {cpu_area}",
-    ]
-    status_line = UI_STATUS_SEPARATOR.join(parts)
-
-    status_surface = font.render(status_line, True, COLOR_SCORE)
-    status_rect = status_surface.get_rect(
-        center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - bar_height // 2)
-    )
-    surface.blit(status_surface, status_rect)
+    status_segments = _status_segments(game, player_text, player_area, cpu_area, "   /   ")
+    for separator in ("  /  ", " / ", "/"):
+        if _segments_width(font, status_segments) <= SCREEN_WIDTH - 16:
+            break
+        status_segments = _status_segments(game, player_text, player_area, cpu_area, separator)
+    _draw_centered_status(surface, font, status_segments, SCREEN_HEIGHT - bar_height // 2)
 
 
 def get_cell_under_pixel(grid, px, py):
@@ -83,6 +80,45 @@ def get_cell_under_pixel(grid, px, py):
         if _point_in_polygon((px, py), points):
             return cell
     return None
+
+
+def _phase_status_text(game):
+    if game.phase == PHASE_DEPLOYMENT:
+        used = DEPLOY_CHUNKS_PER_TURN - game.deploy_chunks_remaining
+        return f"Deploy {used}/{DEPLOY_CHUNKS_PER_TURN}"
+    if game.phase == PHASE_ATTACK:
+        return f"Attack {game.attacks_used}/{MAX_ATTACKS_PER_TURN}"
+    return "Move"
+
+
+def _draw_centered_status(surface, font, segments, center_y):
+    rendered = [font.render(text, True, color) for text, color in segments]
+    total_width = sum(chunk.get_width() for chunk in rendered)
+    x = (SCREEN_WIDTH - total_width) // 2
+    for chunk in rendered:
+        rect = chunk.get_rect(midleft=(x, center_y))
+        surface.blit(chunk, rect)
+        x = rect.right
+
+
+def _status_segments(game, player_text, player_area, cpu_area, separator):
+    return [
+        (f"L: {game.level}", COLOR_SCORE),
+        (separator, COLOR_SCORE),
+        (f"T: {game.turn}", COLOR_SCORE),
+        (separator, COLOR_SCORE),
+        (player_text, COLOR_SCORE),
+        (separator, COLOR_SCORE),
+        (_phase_status_text(game), COLOR_SCORE),
+        (separator, COLOR_SCORE),
+        (f"{player_area}", COLOR_P1_DARK),
+        ("/", COLOR_SCORE),
+        (f"{cpu_area}", COLOR_P2_DARK),
+    ]
+
+
+def _segments_width(font, segments):
+    return sum(font.size(text)[0] for text, _ in segments)
 
 
 def _draw_rivers(surface, grid, grid_line_width):
@@ -117,13 +153,13 @@ def _draw_edge_segments(surface, grid, edges, color, line_width):
         pygame.draw.line(surface, color, p1, p2, line_width)
 
 
-def _draw_terrain_marker(surface, font_terrain, cell, x, y, radius):
-    marker = _terrain_marker_text(cell)
-    if marker is None:
+def _draw_terrain_marker(surface, icon_assets, cell, x, y, radius):
+    icon = icon_assets["terrain"].get(cell.terrain)
+    if icon is None:
         return
     marker_y = y + radius * UI_TERRAIN_MARKER_Y_OFFSET_SCALE
-    txt = font_terrain.render(marker, True, _owner_accent_color(cell.owner))
-    surface.blit(txt, txt.get_rect(center=(x, marker_y)))
+    rect = icon.get_rect(center=(int(round(x)), int(round(marker_y))))
+    surface.blit(icon, rect)
 
 
 def _draw_terrain_status_tag(surface, font_terrain_tag, grid, cell, x, y, radius):
@@ -136,23 +172,17 @@ def _draw_terrain_status_tag(surface, font_terrain_tag, grid, cell, x, y, radius
     surface.blit(txt, txt.get_rect(midleft=(tag_x, tag_y)))
 
 
-def _draw_topology(surface, grid, cell, x, y, radius):
+def _draw_topology(surface, icon_assets, grid, cell, x, y, radius):
     if grid.frontline_topology(cell.q, cell.r) == "exposed":
-        _draw_exposed_dot(surface, x, y, radius, _owner_accent_color(cell.owner))
+        _draw_exposed_icon(surface, icon_assets.get("danger"), x, y, radius)
 
 
-def _draw_exposed_dot(surface, x, y, radius, color):
-    dot_y = y - radius * UI_EXPOSED_DOT_Y_OFFSET_SCALE
-    dot_r = max(1, int(UI_EXPOSED_DOT_RADIUS_PX))
-    pygame.draw.circle(surface, color, (int(round(x)), int(round(dot_y))), dot_r)
-
-
-def _terrain_marker_text(cell):
-    if cell.terrain == TERRAIN_MOUNTAIN:
-        return UI_TERRAIN_MARK_MOUNTAIN
-    if cell.terrain == TERRAIN_FOREST:
-        return UI_TERRAIN_MARK_FOREST
-    return None
+def _draw_exposed_icon(surface, icon, x, y, radius):
+    if icon is None:
+        return
+    icon_y = y - radius * UI_EXPOSED_ICON_Y_OFFSET_SCALE
+    rect = icon.get_rect(center=(int(round(x)), int(round(icon_y))))
+    surface.blit(icon, rect)
 
 
 def _terrain_status_tag_text(cell):
@@ -226,3 +256,18 @@ def _owner_accent_color(owner):
 
 def _is_hidden_from_you(cell):
     return cell.owner == OWNER_CPU and cell.terrain == TERRAIN_FOREST
+
+
+def _scaled_icon_size(radius, scale):
+    return max(12, int(round(radius * scale)))
+
+
+def _load_icon(path, size):
+    key = (path, size)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    icon = pygame.image.load(path).convert_alpha()
+    if icon.get_size() != (size, size):
+        icon = pygame.transform.smoothscale(icon, (size, size))
+    _ICON_CACHE[key] = icon
+    return icon
