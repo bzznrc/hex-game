@@ -1,6 +1,7 @@
 import random
 from collections import deque
 from constants import *
+from hex_grid import HexGrid
 
 
 class HexGame:
@@ -10,11 +11,18 @@ class HexGame:
         self.level = 1
         self.max_levels = CAMPAIGN_LEVELS
         self.phase = PHASE_DEPLOYMENT
-        self.active_player = OWNER_PLAYER
+        self.first_turn_first_player = random.choice((OWNER_PLAYER, OWNER_CPU))
+        self.active_player = self.first_turn_first_player
+        self.game_over = False
+        self.campaign_won = False
 
         self.selected_source = None
-        self.deploy_chunks_remaining = DEPLOY_CHUNKS_PER_TURN
+        self.deploy_chunks_total = self._deploy_chunks_for(self.active_player)
+        self.deploy_units_total = int(self.deploy_chunks_total) * int(UNITS_PER_DEPLOY_CHUNK)
+        self.deploy_units_remaining = self.deploy_units_total
+        self.deploy_chunks_remaining = self.deploy_chunks_total
         self.deploy_placements = {}
+        self.movement_sources_used = set()
         self.attacks_used = 0
         self.last_combat_log = []
         self.cpu_action_delay = float(CPU_ACTION_DELAY_SECONDS)
@@ -22,6 +30,9 @@ class HexGame:
         self.cpu_action_queue = deque()
         self.cpu_action_label = ""
         self.cpu_action_timer = 0.0
+
+        if self.active_player == OWNER_CPU:
+            self._start_cpu_turn()
 
     def clear_selection(self):
         self.selected_source = None
@@ -34,6 +45,13 @@ class HexGame:
             return False
         if cell.troops_of(self.active_player) <= 0:
             return False
+        if self.phase == PHASE_MOVEMENT:
+            coord = (q, r)
+            if (
+                coord not in self.movement_sources_used
+                and len(self.movement_sources_used) >= int(MAX_MOVEMENT_SOURCE_HEXES)
+            ):
+                return False
 
         self.selected_source = (q, r)
         return True
@@ -45,46 +63,71 @@ class HexGame:
             return False
 
         source_q, source_r = self.selected_source
-        return self.grid.transfer_troop(source_q, source_r, q, r, self.active_player)
+        source_coord = (source_q, source_r)
+        if (
+            source_coord not in self.movement_sources_used
+            and len(self.movement_sources_used) >= int(MAX_MOVEMENT_SOURCE_HEXES)
+        ):
+            return False
+
+        moved = self.grid.transfer_troop(source_q, source_r, q, r, self.active_player)
+        if moved:
+            self.movement_sources_used.add(source_coord)
+        return moved
 
     def deploy_chunk_to(self, q, r):
         if self.phase != PHASE_DEPLOYMENT:
             return False
-        if self.deploy_chunks_remaining <= 0:
+        if self.deploy_units_remaining <= 0:
             return False
-        if not self.grid.add_troops(q, r, self.active_player, UNITS_PER_DEPLOY_CHUNK):
+        cell = self.grid.get_cell(q, r)
+        if cell is None:
             return False
-        self.deploy_chunks_remaining -= 1
+        if not self.grid.can_deploy_to_cell(q, r, self.active_player):
+            return False
+
+        free_capacity = self._deploy_capacity_at(q, r)
+        deploy_count = min(
+            int(UNITS_PER_DEPLOY_CHUNK),
+            int(self.deploy_units_remaining),
+            int(free_capacity),
+        )
+        if deploy_count <= 0:
+            return False
+        if not self.grid.add_troops(q, r, self.active_player, deploy_count):
+            return False
+
+        self.deploy_units_remaining -= deploy_count
+        self._sync_deploy_chunks_remaining()
         coord = (q, r)
-        self.deploy_placements[coord] = self.deploy_placements.get(coord, 0) + 1
+        self.deploy_placements.setdefault(coord, []).append(deploy_count)
         return True
 
     def undo_deploy_chunk_from(self, q, r):
         if self.phase != PHASE_DEPLOYMENT:
             return False
         coord = (q, r)
-        placed_chunks = self.deploy_placements.get(coord, 0)
-        if placed_chunks <= 0:
+        placed = self.deploy_placements.get(coord, [])
+        if not placed:
             return False
-        if not self.grid.remove_troops(q, r, self.active_player, UNITS_PER_DEPLOY_CHUNK):
+        remove_count = int(placed[-1])
+        if not self.grid.remove_troops(q, r, self.active_player, remove_count):
             return False
 
-        if placed_chunks == 1:
-            del self.deploy_placements[coord]
-        else:
-            self.deploy_placements[coord] = placed_chunks - 1
-        self.deploy_chunks_remaining = min(
-            DEPLOY_CHUNKS_PER_TURN,
-            self.deploy_chunks_remaining + 1,
+        placed.pop()
+        if not placed:
+            self.deploy_placements.pop(coord, None)
+        self.deploy_units_remaining = min(
+            int(self.deploy_units_total),
+            int(self.deploy_units_remaining) + remove_count,
         )
+        self._sync_deploy_chunks_remaining()
         return True
 
     def attack_selected_to(self, q, r):
         if self.selected_source is None:
             return False
         if self.phase != PHASE_ATTACK:
-            return False
-        if self.attacks_used >= MAX_ATTACKS_PER_TURN:
             return False
 
         source_q, source_r = self.selected_source
@@ -94,19 +137,28 @@ class HexGame:
         if not self._resolve_attack(source_q, source_r, q, r):
             return False
 
+        if self.game_over or self.phase != PHASE_ATTACK or self.active_player != OWNER_PLAYER:
+            self.clear_selection()
+            return True
+
         self.attacks_used += 1
         self.clear_selection()
         return True
 
     def end_player_step(self):
+        if self.game_over:
+            return
         if self.active_player != OWNER_PLAYER:
             return
 
         self.clear_selection()
 
         if self.phase == PHASE_DEPLOYMENT:
-            if self.deploy_chunks_remaining > 0:
-                return
+            if self.deploy_units_remaining > 0:
+                if self._has_deploy_capacity(self.active_player):
+                    return
+                self.deploy_units_remaining = 0
+                self._sync_deploy_chunks_remaining()
             self.phase = PHASE_ATTACK
             self.deploy_placements = {}
             self.attacks_used = 0
@@ -115,12 +167,15 @@ class HexGame:
 
         if self.phase == PHASE_ATTACK:
             self.phase = PHASE_MOVEMENT
+            self.movement_sources_used = set()
             return
 
         if self.phase == PHASE_MOVEMENT:
             self._end_turn()
 
     def update(self, dt_seconds):
+        if self.game_over:
+            return
         if self.active_player != OWNER_CPU:
             return
         if not self.cpu_action_queue:
@@ -135,15 +190,19 @@ class HexGame:
         self._prime_next_cpu_action()
 
     def _end_turn(self):
-        if self.active_player == OWNER_PLAYER:
-            self.active_player = OWNER_CPU
+        current_player = self.active_player
+        if current_player == self.first_turn_first_player:
+            next_player = self.grid.enemy_of(current_player)
         else:
-            self.active_player = OWNER_PLAYER
+            next_player = self.first_turn_first_player
             self.turn += 1
 
+        self.active_player = next_player
+
         self.phase = PHASE_DEPLOYMENT
-        self.deploy_chunks_remaining = DEPLOY_CHUNKS_PER_TURN
+        self._reset_deployment_budget()
         self.deploy_placements = {}
+        self.movement_sources_used = set()
         self.attacks_used = 0
         self.last_combat_log = []
         self.clear_selection()
@@ -166,64 +225,39 @@ class HexGame:
         start_defender_troops = defender_troops
         crossing_river = self._is_river_crossing(source, target)
         topology = self.grid.frontline_topology(target.q, target.r)
+        attacker_chance, modifier_lines = self._attacker_round_chance(
+            crossing_river,
+            target.terrain,
+            topology,
+        )
 
         attacker_label = self._side_name(attacker)
         defender_label = self._side_name(defender)
         self._log(
-            f"Attack: {attacker_label} -> {defender_label} / "
+            f"Attack: {attacker_label} -> {defender_label} | "
             f"Src: [{source_q},{source_r}] & Tgt: [{target_q},{target_r}]"
         )
         self._log("Modifiers:")
-        modifier_lines = self._combat_modifier_lines(crossing_river, target.terrain, topology)
-        if not modifier_lines:
-            self._log("  - None")
-        else:
-            for line in modifier_lines:
-                self._log(f"  - {line}")
+        for line in modifier_lines:
+            self._log(f"  - {line}")
 
         self._log("Turns:")
-        rounds_logged = 0
         round_idx = 1
         while attacker_troops > 0 and defender_troops > 0:
-            attacker_dice = min(3, attacker_troops)
-            if crossing_river:
-                attacker_dice -= 1
-            if attacker_dice <= 0:
-                self._log(f"  - T{round_idx}: Stop (no attack dice)")
-                rounds_logged += 1
-                break
-
-            defender_dice = self._defender_dice(defender_troops, target.terrain, topology)
-            if defender_dice <= 0:
-                defender_troops = 0
-                self._log(f"  - T{round_idx}: Stop (no defense dice)")
-                rounds_logged += 1
-                break
-
-            attacker_rolls = sorted((random.randint(1, 6) for _ in range(attacker_dice)), reverse=True)
-            defender_rolls = sorted((random.randint(1, 6) for _ in range(defender_dice)), reverse=True)
-
-            attacker_losses = 0
-            defender_losses = 0
-            for i in range(min(len(attacker_rolls), len(defender_rolls))):
-                if attacker_rolls[i] > defender_rolls[i]:
-                    defender_troops -= 1
-                    defender_losses += 1
-                else:
-                    attacker_troops -= 1
-                    attacker_losses += 1
+            draw = random.random()
+            if draw < attacker_chance:
+                defender_troops -= 1
+                casualty = "Defender -1"
+            else:
+                attacker_troops -= 1
+                casualty = "Attacker -1"
 
             self._log(
-                f"  - T{round_idx}: AD {attacker_dice} {attacker_rolls} | "
-                f"DD {defender_dice} {defender_rolls} | "
-                f"Loss {attacker_losses}-{defender_losses} | "
-                f"Rem {attacker_troops}-{defender_troops}"
+                f"  - T{round_idx}: Draw {draw:.2f} | "
+                f"A {self._pct(attacker_chance)} -> {casualty} | "
+                f"Remaining {attacker_troops}-{defender_troops}"
             )
-            rounds_logged += 1
             round_idx += 1
-
-        if rounds_logged == 0:
-            self._log("  - None")
 
         if not self.grid.apply_attack_result(
             source_q,
@@ -237,11 +271,21 @@ class HexGame:
             return False
 
         outcome = "Win" if defender_troops == 0 and attacker_troops > 0 else "Loss"
+        winner = attacker_label if outcome == "Win" else defender_label
         self._log(
-            f"Result: {outcome} / "
-            f"Start: {start_attacker_troops}-{start_defender_troops} / "
+            f"Result: {outcome} | Winner: {winner} | "
+            f"Start: {start_attacker_troops}-{start_defender_troops} | "
             f"End: {attacker_troops}-{defender_troops}"
         )
+
+        if self._is_enemy_capital_captured(attacker, defender):
+            if attacker == OWNER_PLAYER:
+                self._log("Capital: Captured CPU capital")
+                self._on_player_level_win()
+            else:
+                self._log("Capital: CPU captured your capital")
+                self._set_game_over(campaign_won=False)
+
         return True
 
     def _is_river_crossing(self, source_cell, target_cell):
@@ -252,42 +296,67 @@ class HexGame:
             target_cell.r,
         )
 
-    def _combat_modifier_lines(self, crossing_river, defender_terrain, topology):
-        lines = []
-        if crossing_river:
-            lines.append("River: Attack Dice -1")
-        if defender_terrain == TERRAIN_FOREST:
-            lines.append("Forest: Hidden units")
-        if topology == "supported":
-            lines.append("Topology - Supported: Defense Dice +1")
-        elif topology == "exposed":
-            if defender_terrain == TERRAIN_MOUNTAIN:
-                lines.append("Topology - Exposed: Neutralized by Mountain")
-            else:
-                lines.append("Topology - Exposed: Defense Dice -1")
+    def _attacker_round_chance(self, crossing_river, defender_terrain, topology):
+        chance = COMBAT_BASE_ATTACKER_CHANCE
+        lines = [f"Base: Attacker {self._pct(chance)} | Defender {self._pct(1.0 - chance)}"]
+
+        if COMBAT_GLOBAL_DEFENDER_BIAS_ATTACKER_DELTA != 0:
+            chance += COMBAT_GLOBAL_DEFENDER_BIAS_ATTACKER_DELTA
+            lines.append(
+                "Global Defender Bias: "
+                f"Attacker {self._signed_pct(COMBAT_GLOBAL_DEFENDER_BIAS_ATTACKER_DELTA)}"
+            )
+
         if defender_terrain == TERRAIN_MOUNTAIN:
-            lines.append("Mountain: Defense Dice +1")
-        return lines
+            chance += COMBAT_MOUNTAIN_DEFENDER_ATTACKER_DELTA
+            lines.append(
+                "Mountain Defender: "
+                f"Attacker {self._signed_pct(COMBAT_MOUNTAIN_DEFENDER_ATTACKER_DELTA)}"
+            )
 
-    def _defender_dice(self, defender_troops, defender_terrain, topology):
-        base = min(2, defender_troops)
-        topology_mod = 0
-        if topology == "supported":
-            topology_mod = 1
-        elif topology == "exposed":
-            topology_mod = -1
+        if crossing_river:
+            chance += COMBAT_RIVER_CROSSING_ATTACKER_DELTA
+            lines.append(
+                "River Crossing: "
+                f"Attacker {self._signed_pct(COMBAT_RIVER_CROSSING_ATTACKER_DELTA)}"
+            )
 
-        if defender_terrain == TERRAIN_MOUNTAIN and topology_mod < 0:
-            topology_mod = 0
-        mountain_mod = 1 if defender_terrain == TERRAIN_MOUNTAIN else 0
+        if topology == "exposed":
+            chance += COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA
+            lines.append(
+                "Exposed Defender: "
+                f"Attacker {self._signed_pct(COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA)}"
+            )
 
-        return min(defender_troops, base + topology_mod + mountain_mod)
+        if defender_terrain == TERRAIN_FOREST:
+            lines.append("Forest: Hidden units (no chance modifier)")
+
+        unclamped = chance
+        chance = max(COMBAT_MIN_ATTACKER_CHANCE, min(COMBAT_MAX_ATTACKER_CHANCE, chance))
+        if chance != unclamped:
+            lines.append(
+                f"Clamp: Attacker {self._pct(unclamped)} -> {self._pct(chance)}"
+            )
+
+        lines.append(f"Final: Attacker {self._pct(chance)} | Defender {self._pct(1.0 - chance)}")
+        return chance, lines
+
+    @staticmethod
+    def _pct(value):
+        return f"{int(round(value * 100))}%"
+
+    @staticmethod
+    def _signed_pct(value):
+        sign = "+" if value >= 0 else ""
+        return f"{sign}{int(round(value * 100))}%"
 
     def _log(self, message):
         self.last_combat_log.append(message)
         print(message)
 
     def handle_click(self, q, r, button):
+        if self.game_over:
+            return
         if self.active_player != OWNER_PLAYER:
             return
 
@@ -325,14 +394,15 @@ class HexGame:
                 self.select_source(q, r)
 
     def _start_cpu_turn(self):
+        if self.game_over:
+            return
         if self.active_player != OWNER_CPU:
             return
 
         self.cpu_action_queue.clear()
-        for i in range(self.deploy_chunks_remaining):
-            self.cpu_action_queue.append((f"Deploy {i + 1}", self._ai_deploy_step))
-        for i in range(MAX_ATTACKS_PER_TURN):
-            self.cpu_action_queue.append((f"Attack {i + 1}", self._ai_attack_step))
+        if self.deploy_units_remaining > 0:
+            self.cpu_action_queue.append(("Deploy", self._ai_deploy_step))
+        self.cpu_action_queue.append(("Attack", self._ai_attack_step))
         self.cpu_action_queue.append(("End Turn", self._ai_end_turn_step))
         self._prime_next_cpu_action()
 
@@ -357,21 +427,89 @@ class HexGame:
 
     def _ai_deploy_step(self):
         self.phase = PHASE_DEPLOYMENT
-        if self.deploy_chunks_remaining <= 0:
+        if self.deploy_units_remaining <= 0:
             self._drop_pending_cpu_actions("Deploy")
             return
 
-        target = self._pick_ai_deploy_target()
-        if target is None or not self.deploy_chunk_to(target.q, target.r):
+        for target in self._iter_ai_deploy_targets():
+            if self.deploy_chunk_to(target.q, target.r):
+                if self.deploy_units_remaining > 0:
+                    self.cpu_action_queue.appendleft(("Deploy", self._ai_deploy_step))
+                else:
+                    self._drop_pending_cpu_actions("Deploy")
+                return
+
+        self.deploy_units_remaining = 0
+        self._sync_deploy_chunks_remaining()
+        self._drop_pending_cpu_actions("Deploy")
+
+    def _sync_deploy_chunks_remaining(self):
+        units_per_chunk = max(1, int(UNITS_PER_DEPLOY_CHUNK))
+        if self.deploy_units_remaining <= 0:
             self.deploy_chunks_remaining = 0
-            self._drop_pending_cpu_actions("Deploy")
+            return
+        self.deploy_chunks_remaining = (
+            int(self.deploy_units_remaining) + units_per_chunk - 1
+        ) // units_per_chunk
+
+    def _reset_deployment_budget(self):
+        self.deploy_chunks_total = self._deploy_chunks_for(self.active_player)
+        self.deploy_units_total = int(self.deploy_chunks_total) * int(UNITS_PER_DEPLOY_CHUNK)
+        self.deploy_units_remaining = self.deploy_units_total
+        self._sync_deploy_chunks_remaining()
+        self.deploy_placements = {}
+
+    def _deploy_capacity_at(self, q, r):
+        cell = self.grid.get_cell(q, r)
+        if cell is None:
+            return 0
+        cap = self.grid.troop_cap_at(q, r)
+        return max(0, int(cap) - int(cell.total_troops()))
+
+    def _has_deploy_capacity(self, player):
+        for cell in self.grid.get_all_cells():
+            if not self.grid.can_deploy_to_cell(cell.q, cell.r, player):
+                continue
+            if self._deploy_capacity_at(cell.q, cell.r) > 0:
+                return True
+        return False
+
+    def _iter_ai_deploy_targets(self):
+        frontline = [
+            c
+            for c in self.grid.frontline_cells(OWNER_CPU)
+            if self.grid.can_deploy_to_cell(c.q, c.r, OWNER_CPU)
+            and self._deploy_capacity_at(c.q, c.r) > 0
+        ]
+        frontline.sort(key=lambda c: self._enemy_pressure(c, OWNER_CPU), reverse=True)
+
+        owned = [
+            c
+            for c in self.grid.get_all_cells()
+            if c.owner == OWNER_CPU
+            and self.grid.can_deploy_to_cell(c.q, c.r, OWNER_CPU)
+            and self._deploy_capacity_at(c.q, c.r) > 0
+        ]
+        owned.sort(key=lambda c: c.troops_of(OWNER_CPU))
+
+        ordered = []
+        seen = set()
+        for cell in frontline + owned:
+            coord = (cell.q, cell.r)
+            if coord in seen:
+                continue
+            seen.add(coord)
+            ordered.append(cell)
+        return ordered
+
+    def _pick_ai_deploy_target(self):
+        targets = self._iter_ai_deploy_targets()
+        if not targets:
+            return None
+        return targets[0]
 
     def _ai_attack_step(self):
         self.phase = PHASE_ATTACK
-        if self.attacks_used >= MAX_ATTACKS_PER_TURN:
-            self._drop_pending_cpu_actions("Attack")
-            return
-
         attack = self._pick_ai_attack()
         if attack is None:
             self._drop_pending_cpu_actions("Attack")
@@ -379,10 +517,60 @@ class HexGame:
 
         source, target = attack
         if self._resolve_attack(source.q, source.r, target.q, target.r):
+            if self.game_over or self.phase != PHASE_ATTACK or self.active_player != OWNER_CPU:
+                return
             self.attacks_used += 1
             self.clear_selection()
+            self.cpu_action_queue.appendleft(("Attack", self._ai_attack_step))
         else:
             self._drop_pending_cpu_actions("Attack")
+
+    def _deploy_chunks_for(self, player):
+        return int(DEPLOY_CHUNKS_PER_TURN) + int(self.grid.deployment_bonus_chunks(player))
+
+    def _is_enemy_capital_captured(self, attacker, defender):
+        capital = self.grid.capital_coord(defender)
+        if capital is None:
+            return False
+        cell = self.grid.get_cell(capital[0], capital[1])
+        if cell is None:
+            return False
+        return cell.owner == attacker
+
+    def _on_player_level_win(self):
+        if self.level >= self.max_levels:
+            self._log("Campaign: Completed all games")
+            self._set_game_over(campaign_won=True)
+            return
+
+        self.level += 1
+        self._log(f"Campaign: Advancing to Game {self.level}/{self.max_levels}")
+        self._reset_for_new_level()
+
+    def _reset_for_new_level(self):
+        self.grid = HexGrid(*HexGrid.compute_grid_size())
+        self.turn = 1
+        self.active_player = self.first_turn_first_player
+        self.phase = PHASE_DEPLOYMENT
+        self._reset_deployment_budget()
+        self.movement_sources_used = set()
+        self.attacks_used = 0
+        self.last_combat_log = []
+        self.clear_selection()
+        self.cpu_action_queue.clear()
+        self.cpu_action_label = ""
+        self.cpu_action_timer = 0.0
+
+        if self.active_player == OWNER_CPU:
+            self._start_cpu_turn()
+
+    def _set_game_over(self, campaign_won):
+        self.game_over = True
+        self.campaign_won = bool(campaign_won)
+        self.phase = "Game Over"
+        self.cpu_action_queue.clear()
+        self.cpu_action_label = ""
+        self.cpu_action_timer = 0.0
 
     def _ai_end_turn_step(self):
         self.phase = PHASE_MOVEMENT
@@ -390,18 +578,6 @@ class HexGame:
         self.cpu_action_label = ""
         self.cpu_action_timer = 0.0
         self._end_turn()
-
-    def _pick_ai_deploy_target(self):
-        frontline = self.grid.frontline_cells(OWNER_CPU)
-        if frontline:
-            frontline.sort(key=lambda c: self._enemy_pressure(c, OWNER_CPU), reverse=True)
-            return frontline[0]
-
-        owned = [c for c in self.grid.get_all_cells() if c.owner == OWNER_CPU]
-        if not owned:
-            return None
-        owned.sort(key=lambda c: c.troops_of(OWNER_CPU))
-        return owned[0]
 
     def _enemy_pressure(self, cell, player):
         enemy = self.grid.enemy_of(player)

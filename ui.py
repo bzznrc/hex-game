@@ -5,21 +5,34 @@ from constants import *
 
 
 _ICON_CACHE = {}
+_TINTED_ICON_CACHE = {}
 
 
 def load_icon_assets(hex_radius, base_dir):
     terrain_size = _scaled_icon_size(hex_radius, UI_TERRAIN_ICON_SIZE_SCALE)
     danger_size = _scaled_icon_size(hex_radius, UI_EXPOSED_ICON_SIZE_SCALE)
+    capital_size = _scaled_icon_size(hex_radius, UI_CAPITAL_ICON_SIZE_SCALE)
+    town_size = _scaled_icon_size(hex_radius, UI_TOWN_ICON_SIZE_SCALE)
+    capital_path = os.path.join(base_dir, ICON_PATH_CAPITAL)
+    town_path = os.path.join(base_dir, ICON_PATH_TOWN)
     return {
         "terrain": {
             TERRAIN_FOREST: _load_icon(os.path.join(base_dir, ICON_PATH_FOREST), terrain_size),
             TERRAIN_MOUNTAIN: _load_icon(os.path.join(base_dir, ICON_PATH_MOUNTAIN), terrain_size),
         },
         "danger": _load_icon(os.path.join(base_dir, ICON_PATH_DANGER), danger_size),
+        "capital": {
+            OWNER_PLAYER: _load_tinted_icon(capital_path, capital_size, COLOR_P1_LIGHT, UI_CAPITAL_ICON_ALPHA),
+            OWNER_CPU: _load_tinted_icon(capital_path, capital_size, COLOR_P2_LIGHT, UI_CAPITAL_ICON_ALPHA),
+        },
+        "town": {
+            OWNER_PLAYER: _load_tinted_icon(town_path, town_size, COLOR_P1_LIGHT, UI_TOWN_ICON_ALPHA),
+            OWNER_CPU: _load_tinted_icon(town_path, town_size, COLOR_P2_LIGHT, UI_TOWN_ICON_ALPHA),
+        },
     }
 
 
-def draw(surface, font_units, font_bar, font_terrain_tag, icon_assets, grid, game):
+def draw(surface, font_units, font_bar, icon_assets, grid, game):
     surface.fill(COLOR_BACKGROUND)
     cache = {}
     radius = grid.hex_radius
@@ -33,7 +46,8 @@ def draw(surface, font_units, font_bar, font_terrain_tag, icon_assets, grid, gam
         x, y = grid.axial_to_pixel(cell.q, cell.r)
         points = _hex_points(cache, x, y, radius)
         pygame.draw.polygon(surface, _cell_fill_color(cell), points)
-        _draw_terrain_marker(surface, icon_assets, cell, x, y, radius)
+        _draw_settlement_marker(surface, icon_assets, grid, cell, x, y)
+        _draw_terrain_marker(surface, icon_assets, grid, cell, x, y, radius)
         _draw_topology(surface, icon_assets, grid, cell, x, y, radius)
 
     for cell in grid.get_all_cells():
@@ -48,8 +62,8 @@ def draw(surface, font_units, font_bar, font_terrain_tag, icon_assets, grid, gam
         troops = cell.total_troops()
         if troops > 0 and not _is_hidden_from_you(cell):
             txt = font_units.render(str(troops), True, _owner_accent_color(cell.owner))
-            surface.blit(txt, txt.get_rect(center=(x, y)))
-            _draw_terrain_status_tag(surface, font_terrain_tag, grid, cell, x, y, radius)
+            text_x, text_y = _troop_text_center(grid, cell, x, y, radius)
+            surface.blit(txt, txt.get_rect(center=(text_x, text_y)))
 
     _draw_rivers(surface, grid, line_width)
     draw_bottom_bar(surface, font_bar, grid, game)
@@ -83,11 +97,18 @@ def get_cell_under_pixel(grid, px, py):
 
 
 def _phase_status_text(game):
+    if getattr(game, "game_over", False):
+        if getattr(game, "campaign_won", False):
+            return "Campaign Won"
+        return "Game Over"
     if game.phase == PHASE_DEPLOYMENT:
-        used = DEPLOY_CHUNKS_PER_TURN - game.deploy_chunks_remaining
-        return f"Deploy {used}/{DEPLOY_CHUNKS_PER_TURN}"
+        if hasattr(game, "deploy_units_total") and hasattr(game, "deploy_units_remaining"):
+            used = game.deploy_units_total - game.deploy_units_remaining
+            return f"Deploy {used}/{game.deploy_units_total}"
+        used = game.deploy_chunks_total - game.deploy_chunks_remaining
+        return f"Deploy {used}/{game.deploy_chunks_total}"
     if game.phase == PHASE_ATTACK:
-        return f"Attack {game.attacks_used}/{MAX_ATTACKS_PER_TURN}"
+        return f"Attack {game.attacks_used}"
     return "Move"
 
 
@@ -153,23 +174,29 @@ def _draw_edge_segments(surface, grid, edges, color, line_width):
         pygame.draw.line(surface, color, p1, p2, line_width)
 
 
-def _draw_terrain_marker(surface, icon_assets, cell, x, y, radius):
+def _draw_terrain_marker(surface, icon_assets, grid, cell, x, y, radius):
+    if grid.is_town_coord(cell.q, cell.r):
+        return
     icon = icon_assets["terrain"].get(cell.terrain)
     if icon is None:
         return
+
     marker_y = y + radius * UI_TERRAIN_MARKER_Y_OFFSET_SCALE
     rect = icon.get_rect(center=(int(round(x)), int(round(marker_y))))
     surface.blit(icon, rect)
 
 
-def _draw_terrain_status_tag(surface, font_terrain_tag, grid, cell, x, y, radius):
-    tags = _status_tags(grid, cell)
-    if not tags:
+def _draw_settlement_marker(surface, icon_assets, grid, cell, x, y):
+    if not grid.is_town_coord(cell.q, cell.r):
         return
-    tag_x = x + radius * UI_TERRAIN_TAG_X_OFFSET_SCALE
-    tag_y = y + radius * UI_TERRAIN_TAG_Y_OFFSET_SCALE
-    txt = font_terrain_tag.render(" ".join(tags), True, _owner_accent_color(cell.owner))
-    surface.blit(txt, txt.get_rect(midleft=(tag_x, tag_y)))
+    if grid.is_capital_coord(cell.q, cell.r):
+        icon = icon_assets["capital"].get(cell.owner)
+    else:
+        icon = icon_assets["town"].get(cell.owner)
+    if icon is None:
+        return
+    rect = icon.get_rect(center=(int(round(x)), int(round(y))))
+    surface.blit(icon, rect)
 
 
 def _draw_topology(surface, icon_assets, grid, cell, x, y, radius):
@@ -183,26 +210,6 @@ def _draw_exposed_icon(surface, icon, x, y, radius):
     icon_y = y - radius * UI_EXPOSED_ICON_Y_OFFSET_SCALE
     rect = icon.get_rect(center=(int(round(x)), int(round(icon_y))))
     surface.blit(icon, rect)
-
-
-def _terrain_status_tag_text(cell):
-    if cell.terrain == TERRAIN_MOUNTAIN:
-        return UI_TERRAIN_TAG_MOUNTAIN
-    if cell.terrain == TERRAIN_FOREST:
-        return UI_TERRAIN_TAG_FOREST
-    return None
-
-
-def _status_tags(grid, cell):
-    tags = []
-    terrain_tag = _terrain_status_tag_text(cell)
-    if terrain_tag is not None:
-        tags.append(terrain_tag)
-
-    topology = grid.frontline_topology(cell.q, cell.r)
-    if topology == "exposed" and cell.terrain != TERRAIN_MOUNTAIN:
-        tags.append(UI_TERRAIN_TAG_EXPOSED)
-    return tags
 
 
 def _point_in_polygon(point, polygon):
@@ -258,6 +265,12 @@ def _is_hidden_from_you(cell):
     return cell.owner == OWNER_CPU and cell.terrain == TERRAIN_FOREST
 
 
+def _troop_text_center(grid, cell, x, y, radius):
+    if grid.is_town_coord(cell.q, cell.r):
+        return x, y + radius * UI_SETTLEMENT_TROOP_Y_OFFSET_SCALE
+    return x, y
+
+
 def _scaled_icon_size(radius, scale):
     return max(12, int(round(radius * scale)))
 
@@ -271,3 +284,18 @@ def _load_icon(path, size):
         icon = pygame.transform.smoothscale(icon, (size, size))
     _ICON_CACHE[key] = icon
     return icon
+
+
+def _load_tinted_icon(path, size, color, alpha):
+    key = (path, size, color, alpha)
+    if key in _TINTED_ICON_CACHE:
+        return _TINTED_ICON_CACHE[key]
+
+    base = _load_icon(path, size)
+    tinted = base.copy()
+    tint_layer = pygame.Surface(tinted.get_size(), pygame.SRCALPHA)
+    tint_layer.fill((color[0], color[1], color[2], 255))
+    tinted.blit(tint_layer, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    tinted.set_alpha(int(alpha))
+    _TINTED_ICON_CACHE[key] = tinted
+    return tinted

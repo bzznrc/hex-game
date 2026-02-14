@@ -17,8 +17,8 @@ def play_game():
     roboto_path = os.path.join(base_dir, FONT_PATH_REGULAR)
     font_units = pygame.font.Font(roboto_path, FONT_SIZE_UNITS)
     font_bar = pygame.font.Font(roboto_path, FONT_SIZE_BAR)
-    font_terrain_tag = pygame.font.Font(roboto_path, FONT_SIZE_TERRAIN_TAG)
     icon_assets = ui.load_icon_assets(grid.hex_radius, base_dir)
+    icon_radius = grid.hex_radius
     game = HexGame(grid)
 
     running = True
@@ -32,12 +32,15 @@ def play_game():
                     game.end_player_step()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 mx, my = event.pos
-                cell = ui.get_cell_under_pixel(grid, mx, my)
+                cell = ui.get_cell_under_pixel(game.grid, mx, my)
                 if cell:
                     game.handle_click(cell.q, cell.r, event.button)
 
         game.update(dt_seconds)
-        ui.draw(screen, font_units, font_bar, font_terrain_tag, icon_assets, grid, game)
+        if game.grid.hex_radius != icon_radius:
+            icon_assets = ui.load_icon_assets(game.grid.hex_radius, base_dir)
+            icon_radius = game.grid.hex_radius
+        ui.draw(screen, font_units, font_bar, icon_assets, game.grid, game)
         pygame.display.flip()
 
     pygame.quit()

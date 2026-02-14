@@ -1,6 +1,8 @@
 import math
 import random
 import heapq
+from collections import deque
+from itertools import combinations
 from constants import *
 
 
@@ -57,10 +59,23 @@ class HexGrid:
         self.river_edges = set()
         # Cached coordinates of cells in fully encircled owner groups.
         self._encircled_cells_cache = None
+        # Cached in-supply cells by owner (connected to own capital).
+        self._supply_reach_cache = {}
+        # Fixed settlement coordinates by original owner.
+        self.capitals = {}
+        self.towns_by_origin = {
+            OWNER_PLAYER: set(),
+            OWNER_CPU: set(),
+        }
+        self.town_coords_set = set()
 
         self._assign_side_ownership_from_cut()
         self._rebuild_boundary_edges()
-        self._generate_terrain()
+        try:
+            self._assign_cities()
+            self._generate_terrain()
+        except ValueError as exc:
+            self._abort_generation(str(exc))
         self.validate_integrity()
 
     @staticmethod
@@ -136,6 +151,27 @@ class HexGrid:
     def enemy_of(player):
         return OWNER_CPU if player == OWNER_PLAYER else OWNER_PLAYER
 
+    @staticmethod
+    def _abort_generation(message):
+        print(f"Spawn configuration impossible: {message}")
+        raise SystemExit(1)
+
+    def _cell_troop_cap(self, q, r):
+        if self.is_town_coord(q, r):
+            return TROOP_CAP_TOWN
+        cell = self.get_cell(q, r)
+        if cell is None:
+            return 0
+        if cell.terrain == TERRAIN_MOUNTAIN:
+            return TROOP_CAP_MOUNTAIN
+        return TROOP_CAP_PLAIN_FOREST
+
+    def troop_cap_at(self, q, r):
+        return self._cell_troop_cap(q, r)
+
+    def _clamp_troops_to_cell_cap(self, value, q, r):
+        return max(0, min(self._cell_troop_cap(q, r), int(value)))
+
     def axial_to_pixel(self, q, r):
         radius = self.hex_radius
         x = self.board_origin_x + radius * (1.5 * q + 1)
@@ -170,6 +206,19 @@ class HexGrid:
         return any(n.q == q2 and n.r == r2 for n in self.get_neighbors(q1, r1))
 
     @staticmethod
+    def _offset_to_cube(q, r):
+        x = q
+        z = r - ((q - (q & 1)) // 2)
+        y = -x - z
+        return x, y, z
+
+    @classmethod
+    def _hex_distance(cls, a, b):
+        ax, ay, az = cls._offset_to_cube(a[0], a[1])
+        bx, by, bz = cls._offset_to_cube(b[0], b[1])
+        return max(abs(ax - bx), abs(ay - by), abs(az - bz))
+
+    @staticmethod
     def _edge_key(a, b):
         return (a, b) if a < b else (b, a)
 
@@ -184,7 +233,7 @@ class HexGrid:
         cell = self.get_cell(q, r)
         if not self.can_deploy_to_cell(q, r, player):
             return False
-        if cell.total_troops() + count > MAX_TROOPS_PER_CELL:
+        if cell.total_troops() + count > self._cell_troop_cap(q, r):
             return False
 
         cell.troops[player] += count
@@ -219,8 +268,7 @@ class HexGrid:
         if cell.troops[enemy] > 0:
             return False
 
-        # "On or behind the frontline" maps to all friendly cells in this ownership model.
-        return True
+        return self.in_supply(q, r, player)
 
     def transfer_troop(self, source_q, source_r, target_q, target_r, player):
         if not self.are_adjacent(source_q, source_r, target_q, target_r):
@@ -234,7 +282,7 @@ class HexGrid:
             return False
         if source.troops[player] <= 0:
             return False
-        if target.total_troops() >= MAX_TROOPS_PER_CELL:
+        if target.total_troops() >= self._cell_troop_cap(target_q, target_r):
             return False
         enemy = self.enemy_of(player)
         if source.troops[enemy] > 0 or target.troops[enemy] > 0:
@@ -259,11 +307,6 @@ class HexGrid:
             return False
         if source.troops[attacker] <= 0:
             return False
-        attack_dice = min(3, source.troops[attacker])
-        if self.has_river_between(source_q, source_r, target_q, target_r):
-            attack_dice -= 1
-        if attack_dice <= 0:
-            return False
         return True
 
     def apply_attack_result(
@@ -287,8 +330,8 @@ class HexGrid:
         if target.owner != defender:
             return False
 
-        attacker_remaining = max(0, min(MAX_TROOPS_PER_CELL, int(attacker_remaining)))
-        defender_remaining = max(0, min(MAX_TROOPS_PER_CELL, int(defender_remaining)))
+        attacker_remaining = self._clamp_troops_to_cell_cap(attacker_remaining, source_q, source_r)
+        defender_remaining = self._clamp_troops_to_cell_cap(defender_remaining, target_q, target_r)
 
         source.troops[attacker] = attacker_remaining
         source.troops[defender] = 0
@@ -317,6 +360,85 @@ class HexGrid:
             elif cell.owner == OWNER_CPU:
                 cpu_cells += 1
         return player_cells, cpu_cells
+
+    def capital_coord(self, owner):
+        return self.capitals.get(owner)
+
+    def town_coords(self, origin_owner=None):
+        if origin_owner is None:
+            coords = set()
+            for owner in (OWNER_PLAYER, OWNER_CPU):
+                coords.update(self.towns_by_origin.get(owner, set()))
+            return coords
+        return set(self.towns_by_origin.get(origin_owner, set()))
+
+    def is_town_coord(self, q, r):
+        return (q, r) in self.town_coords_set
+
+    def is_capital_coord(self, q, r):
+        coord = (q, r)
+        return any(capital == coord for capital in self.capitals.values())
+
+    def is_city_coord(self, q, r):
+        return self.is_town_coord(q, r)
+
+    def capital_owner_at(self, q, r):
+        coord = (q, r)
+        for owner, capital in self.capitals.items():
+            if capital == coord:
+                return owner
+        return None
+
+    def controlled_supplied_city_count(self, owner):
+        count = 0
+        for coord in self.town_coords_set:
+            cell = self.get_cell(coord[0], coord[1])
+            if cell is None or cell.owner != owner:
+                continue
+            if self.in_supply(coord[0], coord[1], owner):
+                count += 1
+        return count
+
+    def deployment_bonus_chunks(self, owner):
+        return self.controlled_supplied_city_count(owner) * DEPLOY_BONUS_CHUNKS_PER_SUPPLIED_TOWN
+
+    def in_supply(self, q, r, owner):
+        cell = self.get_cell(q, r)
+        if cell is None or cell.owner != owner:
+            return False
+        return (q, r) in self._capital_supply_reach(owner)
+
+    def _capital_supply_reach(self, owner):
+        if owner in self._supply_reach_cache:
+            return self._supply_reach_cache[owner]
+
+        capital = self.capital_coord(owner)
+        if capital is None:
+            self._supply_reach_cache[owner] = set()
+            return self._supply_reach_cache[owner]
+
+        capital_cell = self.get_cell(capital[0], capital[1])
+        if capital_cell is None or capital_cell.owner != owner:
+            self._supply_reach_cache[owner] = set()
+            return self._supply_reach_cache[owner]
+
+        reachable = set()
+        queue = deque([capital])
+        reachable.add(capital)
+
+        while queue:
+            q, r = queue.popleft()
+            for neighbor in self.get_neighbors(q, r):
+                if neighbor.owner != owner:
+                    continue
+                coord = (neighbor.q, neighbor.r)
+                if coord in reachable:
+                    continue
+                reachable.add(coord)
+                queue.append(coord)
+
+        self._supply_reach_cache[owner] = reachable
+        return reachable
 
     def _generate_ownership_cut_by_row(self):
         target_p1_cells = (self.cols * self.rows) // 2
@@ -395,6 +517,165 @@ class HexGrid:
                 cell.troops[OWNER_P1] = 0
                 cell.troops[OWNER_P2] = 0
 
+    def _assign_cities(self):
+        capitals = {}
+        towns_by_origin = {
+            OWNER_PLAYER: set(),
+            OWNER_CPU: set(),
+        }
+        town_coords_set = set()
+
+        required = int(CITIES_PER_PLAYER)
+        if required < 1:
+            raise ValueError("CITIES_PER_PLAYER must be at least 1")
+
+        for owner in (OWNER_PLAYER, OWNER_CPU):
+            coords, frontline_distance = self._pick_city_coords_for_owner(owner, required)
+            if len(coords) < required:
+                raise ValueError(f"Unable to place required cities for owner {owner}")
+
+            capital = max(coords, key=lambda coord: self._city_rank(coord, frontline_distance))
+            capitals[owner] = capital
+            for coord in coords:
+                town_coords_set.add(coord)
+                towns_by_origin[owner].add(coord)
+
+        self.capitals = capitals
+        self.towns_by_origin = towns_by_origin
+        self.town_coords_set = town_coords_set
+        self._supply_reach_cache = {}
+
+    def _pick_city_coords_for_owner(self, owner, count):
+        if count <= 0:
+            return [], {}
+
+        owner_cells = [c for c in self.get_all_cells() if c.owner == owner]
+        if not owner_cells:
+            return [], {}
+
+        frontline_distance = self._frontline_distance_map(owner_cells, owner)
+        min_depth = int(CITY_MIN_FRONTLINE_DISTANCE)
+
+        plain_candidates = self._city_candidates(
+            owner_cells,
+            frontline_distance,
+            min_depth,
+            plain_only=True,
+        )
+        if len(plain_candidates) >= count:
+            coords = self._select_spread_city_coords(plain_candidates, frontline_distance, count)
+            if len(coords) == count:
+                return coords, frontline_distance
+
+        fallback_candidates = self._city_candidates(
+            owner_cells,
+            frontline_distance,
+            min_depth,
+            plain_only=False,
+        )
+        if len(fallback_candidates) >= count:
+            coords = self._select_spread_city_coords(fallback_candidates, frontline_distance, count)
+            if len(coords) == count:
+                return coords, frontline_distance
+
+        return [], frontline_distance
+
+    def _frontline_distance_map(self, owner_cells, owner):
+        frontline = {(c.q, c.r) for c in owner_cells if self.is_frontline_cell(c.q, c.r)}
+        distance = {}
+
+        if frontline:
+            queue = deque(frontline)
+            for coord in frontline:
+                distance[coord] = 0
+
+            while queue:
+                q, r = queue.popleft()
+                base_dist = distance[(q, r)]
+                for neighbor in self.get_neighbors(q, r):
+                    if neighbor.owner != owner:
+                        continue
+                    coord = (neighbor.q, neighbor.r)
+                    if coord in distance:
+                        continue
+                    distance[coord] = base_dist + 1
+                    queue.append(coord)
+            return distance
+
+        fallback_distance = self.cols + self.rows
+        for cell in owner_cells:
+            distance[(cell.q, cell.r)] = fallback_distance
+        return distance
+
+    def _city_rank(self, coord, frontline_distance):
+        q, r = coord
+        depth = frontline_distance.get(coord, 0)
+        interior = 1 if len(self.get_neighbors(q, r)) == 6 else 0
+        center_q = (self.cols - 1) / 2.0
+        center_r = (self.rows - 1) / 2.0
+        center_bias = -abs(q - center_q) - abs(r - center_r)
+        return depth, interior, center_bias
+
+    def _city_candidates(self, owner_cells, frontline_distance, min_depth, plain_only=True):
+        ranked = []
+        for cell in owner_cells:
+            if plain_only and cell.terrain != TERRAIN_PLAIN:
+                continue
+            coord = (cell.q, cell.r)
+            if frontline_distance.get(coord, 0) < min_depth:
+                continue
+            ranked.append((self._city_rank(coord, frontline_distance), coord))
+
+        ranked.sort(reverse=True)
+        return [coord for _, coord in ranked]
+
+    def _select_spread_city_coords(self, candidates, frontline_distance, count):
+        if len(candidates) < count:
+            return []
+        if len(candidates) == count:
+            return list(candidates)
+
+        best_combo = None
+        best_score = None
+
+        combo_limit = max(1, int(CITY_PLACEMENT_MAX_COMBINATIONS))
+        for idx, combo in enumerate(combinations(candidates, count)):
+            if idx >= combo_limit:
+                break
+            cluster_score = self._city_cluster_score(combo, frontline_distance)
+            if best_combo is None or cluster_score > best_score:
+                best_combo = combo
+                best_score = cluster_score
+
+        if best_combo is not None:
+            return list(best_combo)
+        return list(candidates[:count])
+
+    def _city_cluster_metrics(self, coords):
+        pair_distances = []
+        for idx, coord in enumerate(coords):
+            for other in coords[idx + 1:]:
+                pair_distances.append(self._hex_distance(coord, other))
+
+        if not pair_distances:
+            return 0, 0
+
+        min_pair = min(pair_distances)
+        max_pair = max(pair_distances)
+        spread_gap = max_pair - min_pair
+        return min_pair, spread_gap
+
+    def _city_cluster_score(self, coords, frontline_distance):
+        min_pair, spread_gap = self._city_cluster_metrics(coords)
+        total_depth = sum(frontline_distance.get(coord, 0) for coord in coords)
+        return (
+            1 if min_pair >= int(CITY_MIN_PAIR_DISTANCE) else 0,
+            1 if spread_gap <= int(CITY_SPACING_MARGIN) else 0,
+            min_pair,
+            -spread_gap,
+            total_depth,
+        )
+
     def _is_player_owner(self, owner):
         return owner in (OWNER_PLAYER, OWNER_CPU)
 
@@ -417,6 +698,7 @@ class HexGrid:
     def _rebuild_boundary_edges(self):
         self.boundary_edges = set(self._iter_frontline_edges())
         self._encircled_cells_cache = None
+        self._supply_reach_cache = {}
 
     def frontline_cells(self, player):
         cells = set()
@@ -514,10 +796,8 @@ class HexGrid:
 
     def defense_topology_modifier(self, q, r):
         topology = self.frontline_topology(q, r)
-        if topology == "supported":
-            return 1
         if topology == "exposed":
-            return -1
+            return -COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA
         return 0
 
     def validate_integrity(self):
@@ -532,15 +812,16 @@ class HexGrid:
                     f"Negative troops at ({cell.q},{cell.r}): "
                     f"player={player_troops}, cpu={cpu_troops}"
                 )
-            if player_troops > MAX_TROOPS_PER_CELL or cpu_troops > MAX_TROOPS_PER_CELL:
+            cap = self._cell_troop_cap(cell.q, cell.r)
+            if player_troops > cap or cpu_troops > cap:
                 raise ValueError(
-                    f"Per-side max exceeded at ({cell.q},{cell.r}): "
-                    f"player={player_troops}, cpu={cpu_troops}"
+                    f"Per-side cap exceeded at ({cell.q},{cell.r}): "
+                    f"cap={cap} player={player_troops}, cpu={cpu_troops}"
                 )
-            if player_troops + cpu_troops > MAX_TROOPS_PER_CELL:
+            if player_troops + cpu_troops > cap:
                 raise ValueError(
-                    f"Cell max exceeded at ({cell.q},{cell.r}): "
-                    f"total={player_troops + cpu_troops}"
+                    f"Cell cap exceeded at ({cell.q},{cell.r}): "
+                    f"cap={cap} total={player_troops + cpu_troops}"
                 )
 
             if cell.owner == OWNER_PLAYER and cpu_troops != 0:
@@ -574,21 +855,122 @@ class HexGrid:
             if not self.are_adjacent(c1.q, c1.r, c2.q, c2.r):
                 raise ValueError("River edge references non-adjacent cells")
 
-    def _generate_terrain(self):
-        self._generate_rivers()
-        self._generate_forests()
-        self._generate_mountains()
+        for owner in (OWNER_PLAYER, OWNER_CPU):
+            coord = self.capitals.get(owner)
+            if coord is None:
+                raise ValueError(f"Missing capital for owner {owner}")
+            if self.get_cell(coord[0], coord[1]) is None:
+                raise ValueError(f"Capital references invalid cell: owner={owner} coord={coord}")
+            if self.get_cell(coord[0], coord[1]).terrain != TERRAIN_PLAIN:
+                raise ValueError(f"Capital must be on plain terrain: owner={owner} coord={coord}")
 
-    def _generate_rivers(self):
+            towns = self.towns_by_origin.get(owner, set())
+            expected_towns = int(CITIES_PER_PLAYER)
+            if len(towns) != expected_towns:
+                raise ValueError(
+                    f"Unexpected settlement count for owner {owner}: {len(towns)}"
+                )
+            if coord not in towns:
+                raise ValueError(f"Capital must be included in towns: owner={owner} coord={coord}")
+            for town in towns:
+                town_cell = self.get_cell(town[0], town[1])
+                if town_cell is None:
+                    raise ValueError(f"Town references invalid cell: owner={owner} coord={town}")
+                if town_cell.terrain != TERRAIN_PLAIN:
+                    raise ValueError(f"Town must be on plain terrain: owner={owner} coord={town}")
+
+        if len(self.town_coords_set) != int(CITIES_PER_PLAYER) * 2:
+            raise ValueError("Settlement coordinate set size mismatch")
+
+    def _generate_terrain(self):
+        self._reset_terrain_to_plain()
+        config = self._validate_spawn_configuration()
+        self._generate_rivers(config["rivers"])
+        self._generate_clustered_terrain(TERRAIN_MOUNTAIN, config["mountains"])
+        self._generate_clustered_terrain(TERRAIN_FOREST, config["forests"])
+
+    def _reset_terrain_to_plain(self):
+        for cell in self.get_all_cells():
+            cell.terrain = TERRAIN_PLAIN
+
+    def _validate_spawn_configuration(self):
+        rivers = self._normalize_range_config(MIN_RIVERS, MAX_RIVERS, "rivers")
+        mountains = self._normalize_cluster_config(
+            MIN_MOUNTAIN_CLUSTERS,
+            MAX_MOUNTAIN_CLUSTERS,
+            MAX_MOUNTAINS_PER_CLUSTER,
+            "mountains",
+        )
+        forests = self._normalize_cluster_config(
+            MIN_FOREST_CLUSTERS,
+            MAX_FOREST_CLUSTERS,
+            MAX_FORESTS_PER_CLUSTER,
+            "forests",
+        )
+
+        blocked_for_terrain = len(self.town_coords_set)
+        terrain_capacity = self.cols * self.rows - blocked_for_terrain
+        if terrain_capacity < 0:
+            raise ValueError("Settlement count exceeds board capacity")
+
+        min_terrain_tiles = mountains[0] + forests[0]
+        if min_terrain_tiles > terrain_capacity:
+            raise ValueError(
+                f"minimum terrain tiles ({min_terrain_tiles}) exceed available cells ({terrain_capacity})"
+            )
+
+        max_unique_river_edges = len(self._all_adjacency_edges())
+        if rivers[0] > max_unique_river_edges:
+            raise ValueError(
+                f"minimum rivers ({rivers[0]}) exceed possible river edges ({max_unique_river_edges})"
+            )
+
+        if rivers[0] > 0 and len(self._boundary_cell_coords()) < 2:
+            raise ValueError("board has insufficient boundary cells to place rivers")
+
+        return {
+            "rivers": rivers,
+            "mountains": mountains,
+            "forests": forests,
+        }
+
+    @staticmethod
+    def _normalize_range_config(min_value, max_value, label):
+        min_value = int(min_value)
+        max_value = int(max_value)
+        if min_value < 0 or max_value < 0:
+            raise ValueError(f"{label} cannot be negative")
+        if max_value < min_value:
+            raise ValueError(f"{label} has min ({min_value}) greater than max ({max_value})")
+        return min_value, max_value
+
+    def _normalize_cluster_config(self, min_clusters, max_clusters, max_tiles_per_cluster, label):
+        min_clusters, max_clusters = self._normalize_range_config(
+            min_clusters,
+            max_clusters,
+            f"{label} clusters",
+        )
+        max_tiles_per_cluster = int(max_tiles_per_cluster)
+        if max_tiles_per_cluster < 0:
+            raise ValueError(f"{label} max tiles per cluster cannot be negative")
+        if max_clusters > 0 and max_tiles_per_cluster < 1:
+            raise ValueError(f"{label} requires at least one tile per cluster")
+        return min_clusters, max_clusters, max_tiles_per_cluster
+
+    def _generate_rivers(self, river_config):
         self.river_edges = set()
-        min_rivers = max(0, int(MIN_RIVERS))
-        max_rivers = max(min_rivers, int(MAX_RIVERS))
+        min_rivers, max_rivers = river_config
+        if max_rivers <= 0:
+            return
+
         river_count = random.randint(min_rivers, max_rivers)
         if river_count <= 0:
             return
 
         river_graph = self._build_river_graph()
         if river_graph is None:
+            if min_rivers > 0:
+                raise ValueError("cannot build a river graph for this map shape")
             return
 
         target_min_length = max(1, min(self.cols, self.rows) - 1)
@@ -605,6 +987,11 @@ class HexGrid:
                 continue
             self.river_edges.update(path_edges)
             created += 1
+
+        if created < min_rivers:
+            raise ValueError(
+                f"could only place {created} rivers, below minimum required {min_rivers}"
+            )
 
     @staticmethod
     def _vertex_key(x, y):
@@ -802,59 +1189,116 @@ class HexGrid:
                 return path_edges
         return None
 
-    def _generate_mountains(self):
-        self._generate_clustered_terrain(
-            MIN_MOUNTAIN_CLUSTERS,
-            MAX_MOUNTAIN_CLUSTERS,
-            MAX_MOUNTAINS_PER_CLUSTER,
-            TERRAIN_MOUNTAIN,
-        )
+    def _path_edges(self, coord_path):
+        if not coord_path or len(coord_path) < 2:
+            return []
+        edges = []
+        for idx in range(len(coord_path) - 1):
+            edges.append(self._edge_key(coord_path[idx], coord_path[idx + 1]))
+        return edges
 
-    def _generate_forests(self):
-        self._generate_clustered_terrain(
-            MIN_FOREST_CLUSTERS,
-            MAX_FOREST_CLUSTERS,
-            MAX_FORESTS_PER_CLUSTER,
-            TERRAIN_FOREST,
-        )
+    def _all_adjacency_edges(self):
+        edges = set()
+        for cell in self.get_all_cells():
+            a = (cell.q, cell.r)
+            for neighbor in self.get_neighbors(cell.q, cell.r):
+                b = (neighbor.q, neighbor.r)
+                if a < b:
+                    edges.add((a, b))
+        return edges
 
-    def _generate_clustered_terrain(
-        self,
-        min_clusters,
-        max_clusters,
-        max_tiles_per_cluster,
-        terrain_type,
-    ):
-        min_clusters = max(0, int(min_clusters))
-        max_clusters = max(min_clusters, int(max_clusters))
-        cluster_count = random.randint(min_clusters, max_clusters)
-        candidates = [c for c in self.get_all_cells() if c.terrain == TERRAIN_PLAIN]
-        random.shuffle(candidates)
+    def _boundary_cell_coords(self):
+        boundary = []
+        for cell in self.get_all_cells():
+            if len(self.get_neighbors(cell.q, cell.r)) < 6:
+                boundary.append((cell.q, cell.r))
+        return boundary
 
-        created = 0
-        for seed in candidates:
-            if created >= cluster_count:
+    def _generate_clustered_terrain(self, terrain_type, cluster_config):
+        min_clusters, max_clusters, max_tiles_per_cluster = cluster_config
+        if max_clusters <= 0:
+            return
+
+        available = self._available_terrain_coords()
+        if not available:
+            return
+
+        max_placeable_clusters = min(max_clusters, len(available))
+        if max_placeable_clusters < min_clusters:
+            raise ValueError(
+                f"cannot place minimum clusters ({min_clusters}); available terrain cells: {len(available)}"
+            )
+
+        cluster_count = random.randint(min_clusters, max_placeable_clusters)
+        for cluster_index in range(cluster_count):
+            remaining_clusters = cluster_count - cluster_index
+            remaining_cells = len(available)
+            max_size_by_capacity = remaining_cells - (remaining_clusters - 1)
+            max_cluster_size = min(max_tiles_per_cluster, max_size_by_capacity)
+            if max_cluster_size <= 0:
                 break
-            if seed.terrain != TERRAIN_PLAIN:
+
+            target_size = random.randint(1, max_cluster_size)
+            seed = self._pick_cluster_seed(available)
+            cluster_coords = self._grow_cluster(seed, target_size, available)
+            for coord in cluster_coords:
+                cell = self.get_cell(coord[0], coord[1])
+                if cell is not None:
+                    cell.terrain = terrain_type
+
+    def _available_terrain_coords(self):
+        blocked = self.town_coords_set
+        return {
+            (cell.q, cell.r)
+            for cell in self.get_all_cells()
+            if cell.terrain == TERRAIN_PLAIN and (cell.q, cell.r) not in blocked
+        }
+
+    def _pick_cluster_seed(self, available_coords):
+        interior = [
+            coord
+            for coord in available_coords
+            if len(self.get_neighbors(coord[0], coord[1])) == 6
+        ]
+        if interior:
+            return random.choice(interior)
+        return random.choice(tuple(available_coords))
+
+    def _grow_cluster(self, seed_coord, target_size, available_coords):
+        cluster = []
+        cluster_set = set()
+        frontier = [seed_coord]
+
+        while frontier and len(cluster) < target_size:
+            coord = frontier.pop(random.randrange(len(frontier)))
+            if coord not in available_coords:
                 continue
-            cluster_size = random.randint(1, int(max_tiles_per_cluster))
-            self._grow_terrain_cluster(seed, cluster_size, terrain_type)
-            created += 1
+            available_coords.remove(coord)
+            cluster.append(coord)
+            cluster_set.add(coord)
 
-    def _grow_terrain_cluster(self, seed, target_size, terrain_type):
-        frontier = [seed]
-        placed = 0
-
-        while frontier and placed < target_size:
-            cell = frontier.pop(random.randrange(len(frontier)))
-            if cell.terrain != TERRAIN_PLAIN:
-                continue
-
-            cell.terrain = terrain_type
-            placed += 1
-
-            neighbors = self.get_neighbors(cell.q, cell.r)
+            neighbors = self._neighbor_coords(coord)
             random.shuffle(neighbors)
-            for neighbor in neighbors:
-                if neighbor.terrain == TERRAIN_PLAIN:
-                    frontier.append(neighbor)
+            for neighbor_coord in neighbors:
+                if neighbor_coord in available_coords:
+                    frontier.append(neighbor_coord)
+
+        while len(cluster) < target_size and available_coords:
+            border = [
+                coord
+                for coord in available_coords
+                if any(neighbor in cluster_set for neighbor in self._neighbor_coords(coord))
+            ]
+            if border:
+                coord = random.choice(border)
+            else:
+                coord = random.choice(tuple(available_coords))
+            available_coords.remove(coord)
+            cluster.append(coord)
+            cluster_set.add(coord)
+
+        return cluster
+
+    def _neighbor_coords(self, coord):
+        q, r = coord
+        return [(neighbor.q, neighbor.r) for neighbor in self.get_neighbors(q, r)]
