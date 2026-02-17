@@ -1,0 +1,2 @@
+-e ../bazza-game-design-system
+pygame>=2.5

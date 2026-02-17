@@ -1,10 +1,53 @@
 import math
 import random
-import heapq
 from collections import deque
 from itertools import combinations
-from constants import *
 
+from config import (
+    BB_HEIGHT,
+    CITIES_PER_PLAYER,
+    CITY_MIN_FRONTLINE_DISTANCE,
+    CITY_MIN_PAIR_DISTANCE,
+    CITY_PLACEMENT_MAX_COMBINATIONS,
+    CITY_SPACING_MARGIN,
+    COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA,
+    DEPLOY_BONUS_CHUNKS_PER_SUPPLIED_TOWN,
+    MAX_FOREST_CLUSTERS,
+    MAX_FORESTS_PER_CLUSTER,
+    MAX_MOUNTAIN_CLUSTERS,
+    MAX_MOUNTAINS_PER_CLUSTER,
+    MAX_RIVERS,
+    MIN_FOREST_CLUSTERS,
+    MIN_MOUNTAIN_CLUSTERS,
+    MIN_RIVERS,
+    OWNER_CPU,
+    OWNER_NEUTRAL,
+    OWNER_P1,
+    OWNER_P2,
+    OWNER_PLAYER,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    TARGET_HEX_COUNT,
+    TERRAIN_FOREST,
+    TERRAIN_MOUNTAIN,
+    TERRAIN_PLAIN,
+    TROOP_CAP_MOUNTAIN,
+    TROOP_CAP_PLAIN_FOREST,
+    TROOP_CAP_TOWN,
+)
+from bgds.boards.hex_generation import (
+    collect_adjacency_edges,
+    collect_boundary_coords,
+    generate_boundary_crossing_edges,
+    generate_clustered_regions,
+    normalize_cluster_config,
+    normalize_range_config,
+)
+from bgds.boards.hex_layout import (
+    axial_to_pixel_odd_q,
+    compute_best_fit_hex_layout,
+    neighbor_coords_odd_q,
+)
 
 class HexCell:
     def __init__(self, q, r):
@@ -22,7 +65,6 @@ class HexCell:
 
     def total_troops(self):
         return self.troops[OWNER_P1] + self.troops[OWNER_P2]
-
 
 class HexGrid:
     def __init__(
@@ -83,69 +125,14 @@ class HexGrid:
         return BB_HEIGHT
 
     @staticmethod
-    def _board_width(cols, radius):
-        return radius * (1.5 * (cols - 1) + 2)
-
-    @staticmethod
-    def _board_height(cols, rows, radius):
-        odd_offset = 0.5 if cols > 1 else 0.0
-        return radius * ((rows - 1 + odd_offset) * math.sqrt(3) + 2)
-
-    @staticmethod
     def compute_grid_size():
-        bar_height = HexGrid.compute_bottom_bar_height()
-        available_width = SCREEN_WIDTH
-        available_height = SCREEN_HEIGHT - bar_height
-        target_tiles = max(2, int(GRID_HEX_COUNT))
-        if target_tiles % 2 != 0:
-            target_tiles -= 1
-
-        best = None
-        best_score = None
-        target_aspect = available_width / max(1, available_height)
-
-        max_cols = max(2, int(math.sqrt(target_tiles * target_aspect) * 2) + 6)
-        max_rows = max(1, int(math.sqrt(target_tiles / max(target_aspect, 0.1)) * 2) + 6)
-
-        for cols in range(2, max_cols + 1):
-            for rows in range(1, max_rows + 1):
-                area = cols * rows
-                if area % 2 != 0:
-                    continue
-
-                radius_by_width = available_width / (1.5 * (cols - 1) + 2)
-                odd_offset = 0.5 if cols > 1 else 0.0
-                radius_by_height = available_height / (((rows - 1 + odd_offset) * math.sqrt(3)) + 2)
-                radius = int(min(radius_by_width, radius_by_height))
-                if radius < 6:
-                    continue
-
-                # Primary objective: match requested tile count as closely as possible.
-                # Secondary objective: use the largest hex radius that fits.
-                # Third objective: keep board aspect close to screen aspect.
-                diff_tiles = abs(area - target_tiles)
-                diff_aspect = abs((cols / rows) - target_aspect)
-                score = (diff_tiles, -radius, diff_aspect, -area)
-
-                if best is None or score < best_score:
-                    best = (cols, rows, radius)
-                    best_score = score
-
-        if best is not None:
-            cols, rows, radius = best
-            board_width = HexGrid._board_width(cols, radius)
-            board_height = HexGrid._board_height(cols, rows, radius)
-            origin_x = int((available_width - board_width) / 2)
-            origin_y = int((available_height - board_height) / 2)
-            return cols, rows, radius, origin_x, origin_y, bar_height
-
-        # Safe fallback (should not normally happen).
-        cols, rows, radius = 2, 1, 20
-        board_width = HexGrid._board_width(cols, radius)
-        board_height = HexGrid._board_height(cols, rows, radius)
-        origin_x = int((available_width - board_width) / 2)
-        origin_y = int((available_height - board_height) / 2)
-        return cols, rows, radius, origin_x, origin_y, bar_height
+        layout = compute_best_fit_hex_layout(
+            screen_width_px=SCREEN_WIDTH,
+            screen_height_px=SCREEN_HEIGHT,
+            bottom_bar_height_px=HexGrid.compute_bottom_bar_height(),
+            target_hex_count=TARGET_HEX_COUNT,
+        )
+        return layout.as_tuple()
 
     @staticmethod
     def enemy_of(player):
@@ -173,13 +160,13 @@ class HexGrid:
         return max(0, min(self._cell_troop_cap(q, r), int(value)))
 
     def axial_to_pixel(self, q, r):
-        radius = self.hex_radius
-        x = self.board_origin_x + radius * (1.5 * q + 1)
-        if q % 2 == 0:
-            y = self.board_origin_y + radius + r * (math.sqrt(3) * radius)
-        else:
-            y = self.board_origin_y + radius + (r + 0.5) * (math.sqrt(3) * radius)
-        return x, y
+        return axial_to_pixel_odd_q(
+            q=q,
+            r=r,
+            radius_px=self.hex_radius,
+            origin_x_px=self.board_origin_x,
+            origin_y_px=self.board_origin_y,
+        )
 
     def get_cell(self, q, r):
         if 0 <= q < self.cols and 0 <= r < self.rows:
@@ -190,14 +177,9 @@ class HexGrid:
         return [cell for col in self.cells for cell in col]
 
     def get_neighbors(self, q, r):
-        if q % 2 == 0:
-            deltas = [(1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (0, 1)]
-        else:
-            deltas = [(1, 1), (1, 0), (0, -1), (-1, 0), (-1, 1), (0, 1)]
-
         neighbors = []
-        for dq, dr in deltas:
-            cell = self.get_cell(q + dq, r + dr)
+        for neighbor_q, neighbor_r in neighbor_coords_odd_q(q, r):
+            cell = self.get_cell(neighbor_q, neighbor_r)
             if cell is not None:
                 neighbors.append(cell)
         return neighbors
@@ -894,14 +876,14 @@ class HexGrid:
             cell.terrain = TERRAIN_PLAIN
 
     def _validate_spawn_configuration(self):
-        rivers = self._normalize_range_config(MIN_RIVERS, MAX_RIVERS, "rivers")
-        mountains = self._normalize_cluster_config(
+        rivers = normalize_range_config(MIN_RIVERS, MAX_RIVERS, "rivers")
+        mountains = normalize_cluster_config(
             MIN_MOUNTAIN_CLUSTERS,
             MAX_MOUNTAIN_CLUSTERS,
             MAX_MOUNTAINS_PER_CLUSTER,
             "mountains",
         )
-        forests = self._normalize_cluster_config(
+        forests = normalize_cluster_config(
             MIN_FOREST_CLUSTERS,
             MAX_FOREST_CLUSTERS,
             MAX_FORESTS_PER_CLUSTER,
@@ -919,13 +901,19 @@ class HexGrid:
                 f"minimum terrain tiles ({min_terrain_tiles}) exceed available cells ({terrain_capacity})"
             )
 
-        max_unique_river_edges = len(self._all_adjacency_edges())
+        all_coords = self._all_coords()
+        max_unique_river_edges = len(
+            collect_adjacency_edges(
+                all_coords,
+                self._neighbor_coords,
+            )
+        )
         if rivers[0] > max_unique_river_edges:
             raise ValueError(
                 f"minimum rivers ({rivers[0]}) exceed possible river edges ({max_unique_river_edges})"
             )
 
-        if rivers[0] > 0 and len(self._boundary_cell_coords()) < 2:
+        if rivers[0] > 0 and len(collect_boundary_coords(all_coords, self._neighbor_coords)) < 2:
             raise ValueError("board has insufficient boundary cells to place rivers")
 
         return {
@@ -934,260 +922,23 @@ class HexGrid:
             "forests": forests,
         }
 
-    @staticmethod
-    def _normalize_range_config(min_value, max_value, label):
-        min_value = int(min_value)
-        max_value = int(max_value)
-        if min_value < 0 or max_value < 0:
-            raise ValueError(f"{label} cannot be negative")
-        if max_value < min_value:
-            raise ValueError(f"{label} has min ({min_value}) greater than max ({max_value})")
-        return min_value, max_value
-
-    def _normalize_cluster_config(self, min_clusters, max_clusters, max_tiles_per_cluster, label):
-        min_clusters, max_clusters = self._normalize_range_config(
-            min_clusters,
-            max_clusters,
-            f"{label} clusters",
-        )
-        max_tiles_per_cluster = int(max_tiles_per_cluster)
-        if max_tiles_per_cluster < 0:
-            raise ValueError(f"{label} max tiles per cluster cannot be negative")
-        if max_clusters > 0 and max_tiles_per_cluster < 1:
-            raise ValueError(f"{label} requires at least one tile per cluster")
-        return min_clusters, max_clusters, max_tiles_per_cluster
-
     def _generate_rivers(self, river_config):
         self.river_edges = set()
         min_rivers, max_rivers = river_config
         if max_rivers <= 0:
             return
 
-        river_count = random.randint(min_rivers, max_rivers)
-        if river_count <= 0:
-            return
-
-        river_graph = self._build_river_graph()
-        if river_graph is None:
-            if min_rivers > 0:
-                raise ValueError("cannot build a river graph for this map shape")
-            return
-
         target_min_length = max(1, min(self.cols, self.rows) - 1)
-        attempts = 0
-        created = 0
-
-        while created < river_count and attempts < max(12, river_count * 24):
-            attempts += 1
-            path_edges = self._build_edge_to_edge_river(
-                river_graph,
-                min_length=target_min_length,
-            )
-            if not path_edges:
-                continue
-            self.river_edges.update(path_edges)
-            created += 1
-
-        if created < min_rivers:
-            raise ValueError(
-                f"could only place {created} rivers, below minimum required {min_rivers}"
-            )
-
-    @staticmethod
-    def _vertex_key(x, y):
-        scale = 1000
-        return (int(round(x * scale)), int(round(y * scale)))
-
-    @staticmethod
-    def _vertex_distance_sq(a, b):
-        dx = a[0] - b[0]
-        dy = a[1] - b[1]
-        return dx * dx + dy * dy
-
-    def _cell_vertex_keys(self, q, r):
-        x, y = self.axial_to_pixel(q, r)
-        vertices = []
-        for i in range(6):
-            angle = math.radians(60 * i)
-            vx = x + self.hex_radius * math.cos(angle)
-            vy = y + self.hex_radius * math.sin(angle)
-            vertices.append(self._vertex_key(vx, vy))
-        return tuple(vertices)
-
-    def _build_river_graph(self):
-        cell_vertices = {}
-        side_counts = {}
-
-        for cell in self.get_all_cells():
-            coord = (cell.q, cell.r)
-            vertices = self._cell_vertex_keys(cell.q, cell.r)
-            cell_vertices[coord] = vertices
-            for i in range(6):
-                side = self._edge_key(vertices[i], vertices[(i + 1) % 6])
-                side_counts[side] = side_counts.get(side, 0) + 1
-
-        boundary_vertices = set()
-        for side, count in side_counts.items():
-            if count == 1:
-                boundary_vertices.update(side)
-        if not boundary_vertices:
-            return None
-
-        edge_vertices = {}
-        vertex_graph = {}
-        for cell in self.get_all_cells():
-            a = (cell.q, cell.r)
-            shared_candidates = set(cell_vertices[a])
-            for neighbor in self.get_neighbors(cell.q, cell.r):
-                b = (neighbor.q, neighbor.r)
-                edge = self._edge_key(a, b)
-                if edge in edge_vertices:
-                    continue
-                shared_vertices = tuple(sorted(shared_candidates.intersection(cell_vertices[b])))
-                if len(shared_vertices) != 2:
-                    continue
-                v1, v2 = shared_vertices
-                edge_vertices[edge] = (v1, v2)
-                vertex_graph.setdefault(v1, []).append((v2, edge))
-                vertex_graph.setdefault(v2, []).append((v1, edge))
-        if not edge_vertices:
-            return None
-
-        reachable_boundary_vertices = [
-            vertex for vertex in boundary_vertices if vertex in vertex_graph
-        ]
-        if len(reachable_boundary_vertices) < 2:
-            return None
-
-        xs = [vertex[0] for vertex in reachable_boundary_vertices]
-        ys = [vertex[1] for vertex in reachable_boundary_vertices]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        tolerance = max(1, int(round(self.hex_radius * 300)))
-
-        side_vertices = {"left": [], "right": [], "top": [], "bottom": []}
-        for vertex in reachable_boundary_vertices:
-            x, y = vertex
-            if abs(x - min_x) <= tolerance:
-                side_vertices["left"].append(vertex)
-            if abs(x - max_x) <= tolerance:
-                side_vertices["right"].append(vertex)
-            if abs(y - min_y) <= tolerance:
-                side_vertices["top"].append(vertex)
-            if abs(y - max_y) <= tolerance:
-                side_vertices["bottom"].append(vertex)
-
-        return {
-            "vertex_graph": vertex_graph,
-            "boundary_vertices": tuple(reachable_boundary_vertices),
-            "side_vertices": side_vertices,
-        }
-
-    def _pick_boundary_endpoints(self, side_vertices, boundary_vertices):
-        axis_pairs = [("left", "right"), ("top", "bottom")]
-        random.shuffle(axis_pairs)
-
-        for side_a, side_b in axis_pairs:
-            start_pool = side_vertices.get(side_a, [])
-            end_pool = side_vertices.get(side_b, [])
-            if not start_pool or not end_pool:
-                continue
-            start = random.choice(start_pool)
-            ranked = sorted(
-                end_pool,
-                key=lambda v: self._vertex_distance_sq(start, v),
-                reverse=True,
-            )
-            candidate_count = min(8, len(ranked))
-            end = random.choice(ranked[:candidate_count])
-            if start != end:
-                return start, end
-
-        all_boundary_vertices = list(boundary_vertices)
-        if len(all_boundary_vertices) < 2:
-            return None
-        start = random.choice(all_boundary_vertices)
-        ranked = sorted(
-            all_boundary_vertices,
-            key=lambda v: self._vertex_distance_sq(start, v),
-            reverse=True,
+        self.river_edges = generate_boundary_crossing_edges(
+            coords=self._all_coords(),
+            neighbor_coords_fn=self._neighbor_coords,
+            coord_to_pixel_fn=self.axial_to_pixel,
+            hex_radius=self.hex_radius,
+            min_paths=min_rivers,
+            max_paths=max_rivers,
+            min_path_length=target_min_length,
+            existing_edges=self.river_edges,
         )
-        for end in ranked:
-            if start != end:
-                return start, end
-        return None
-
-    def _find_vertex_path(self, start_vertex, end_vertex, vertex_graph):
-        if start_vertex == end_vertex:
-            return None
-
-        frontier = [(0.0, start_vertex)]
-        best_cost = {start_vertex: 0.0}
-        previous = {}
-
-        while frontier:
-            cost, vertex = heapq.heappop(frontier)
-            if cost > best_cost.get(vertex, float("inf")):
-                continue
-            if vertex == end_vertex:
-                break
-
-            for neighbor, edge in vertex_graph.get(vertex, []):
-                step_cost = 1.0 + random.random() * 0.35
-                if edge in self.river_edges:
-                    step_cost += 2.5
-                next_cost = cost + step_cost
-                if next_cost >= best_cost.get(neighbor, float("inf")):
-                    continue
-                best_cost[neighbor] = next_cost
-                previous[neighbor] = (vertex, edge)
-                heapq.heappush(frontier, (next_cost, neighbor))
-
-        if end_vertex not in previous:
-            return None
-
-        path_edges = []
-        cursor = end_vertex
-        while cursor != start_vertex:
-            prev = previous.get(cursor)
-            if prev is None:
-                return None
-            prev_vertex, edge = prev
-            path_edges.append(edge)
-            cursor = prev_vertex
-        path_edges.reverse()
-        return path_edges
-
-    def _build_edge_to_edge_river(self, river_graph, min_length):
-        vertex_graph = river_graph["vertex_graph"]
-        boundary_vertices = river_graph["boundary_vertices"]
-        side_vertices = river_graph["side_vertices"]
-
-        for _ in range(28):
-            endpoints = self._pick_boundary_endpoints(side_vertices, boundary_vertices)
-            if endpoints is None:
-                return None
-            start_vertex, end_vertex = endpoints
-            path_edges = self._find_vertex_path(start_vertex, end_vertex, vertex_graph)
-            if not path_edges:
-                continue
-            if len(path_edges) < min_length:
-                continue
-            if not any(edge not in self.river_edges for edge in path_edges):
-                continue
-            return path_edges
-
-        for _ in range(12):
-            endpoints = self._pick_boundary_endpoints(side_vertices, boundary_vertices)
-            if endpoints is None:
-                return None
-            start_vertex, end_vertex = endpoints
-            path_edges = self._find_vertex_path(start_vertex, end_vertex, vertex_graph)
-            if not path_edges:
-                continue
-            if any(edge not in self.river_edges for edge in path_edges):
-                return path_edges
-        return None
 
     def _path_edges(self, coord_path):
         if not coord_path or len(coord_path) < 2:
@@ -1198,49 +949,31 @@ class HexGrid:
         return edges
 
     def _all_adjacency_edges(self):
-        edges = set()
-        for cell in self.get_all_cells():
-            a = (cell.q, cell.r)
-            for neighbor in self.get_neighbors(cell.q, cell.r):
-                b = (neighbor.q, neighbor.r)
-                if a < b:
-                    edges.add((a, b))
-        return edges
+        return collect_adjacency_edges(
+            self._all_coords(),
+            self._neighbor_coords,
+        )
 
     def _boundary_cell_coords(self):
-        boundary = []
-        for cell in self.get_all_cells():
-            if len(self.get_neighbors(cell.q, cell.r)) < 6:
-                boundary.append((cell.q, cell.r))
-        return boundary
+        return collect_boundary_coords(
+            self._all_coords(),
+            self._neighbor_coords,
+        )
 
     def _generate_clustered_terrain(self, terrain_type, cluster_config):
         min_clusters, max_clusters, max_tiles_per_cluster = cluster_config
         if max_clusters <= 0:
             return
 
-        available = self._available_terrain_coords()
-        if not available:
-            return
-
-        max_placeable_clusters = min(max_clusters, len(available))
-        if max_placeable_clusters < min_clusters:
-            raise ValueError(
-                f"cannot place minimum clusters ({min_clusters}); available terrain cells: {len(available)}"
-            )
-
-        cluster_count = random.randint(min_clusters, max_placeable_clusters)
-        for cluster_index in range(cluster_count):
-            remaining_clusters = cluster_count - cluster_index
-            remaining_cells = len(available)
-            max_size_by_capacity = remaining_cells - (remaining_clusters - 1)
-            max_cluster_size = min(max_tiles_per_cluster, max_size_by_capacity)
-            if max_cluster_size <= 0:
-                break
-
-            target_size = random.randint(1, max_cluster_size)
-            seed = self._pick_cluster_seed(available)
-            cluster_coords = self._grow_cluster(seed, target_size, available)
+        clusters = generate_clustered_regions(
+            available_coords=self._available_terrain_coords(),
+            neighbor_coords_fn=self._neighbor_coords,
+            min_clusters=min_clusters,
+            max_clusters=max_clusters,
+            max_tiles_per_cluster=max_tiles_per_cluster,
+            is_interior_fn=self._is_interior_coord,
+        )
+        for cluster_coords in clusters:
             for coord in cluster_coords:
                 cell = self.get_cell(coord[0], coord[1])
                 if cell is not None:
@@ -1254,51 +987,13 @@ class HexGrid:
             if cell.terrain == TERRAIN_PLAIN and (cell.q, cell.r) not in blocked
         }
 
-    def _pick_cluster_seed(self, available_coords):
-        interior = [
-            coord
-            for coord in available_coords
-            if len(self.get_neighbors(coord[0], coord[1])) == 6
-        ]
-        if interior:
-            return random.choice(interior)
-        return random.choice(tuple(available_coords))
+    def _all_coords(self):
+        return [(cell.q, cell.r) for cell in self.get_all_cells()]
 
-    def _grow_cluster(self, seed_coord, target_size, available_coords):
-        cluster = []
-        cluster_set = set()
-        frontier = [seed_coord]
-
-        while frontier and len(cluster) < target_size:
-            coord = frontier.pop(random.randrange(len(frontier)))
-            if coord not in available_coords:
-                continue
-            available_coords.remove(coord)
-            cluster.append(coord)
-            cluster_set.add(coord)
-
-            neighbors = self._neighbor_coords(coord)
-            random.shuffle(neighbors)
-            for neighbor_coord in neighbors:
-                if neighbor_coord in available_coords:
-                    frontier.append(neighbor_coord)
-
-        while len(cluster) < target_size and available_coords:
-            border = [
-                coord
-                for coord in available_coords
-                if any(neighbor in cluster_set for neighbor in self._neighbor_coords(coord))
-            ]
-            if border:
-                coord = random.choice(border)
-            else:
-                coord = random.choice(tuple(available_coords))
-            available_coords.remove(coord)
-            cluster.append(coord)
-            cluster_set.add(coord)
-
-        return cluster
+    def _is_interior_coord(self, coord):
+        return len(self._neighbor_coords(coord)) == 6
 
     def _neighbor_coords(self, coord):
         q, r = coord
         return [(neighbor.q, neighbor.r) for neighbor in self.get_neighbors(q, r)]
+

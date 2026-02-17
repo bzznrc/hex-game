@@ -1,23 +1,40 @@
 import pygame
-import os
-from constants import *
+
+from config import (
+    FONT_NAME_BAR,
+    FONT_NAME_UNITS,
+    FONT_PATH_REGULAR,
+    FONT_PATH_UNITS,
+    FONT_SIZE_BAR,
+    FONT_SIZE_UNITS,
+    FPS,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    WINDOW_TITLE,
+)
+from bgds.visual.assets import load_font
 from hex_grid import HexGrid
 from hex_game import HexGame
 import ui
 
-
-def play_game():
+def play_hex():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption(WINDOW_TITLE)
     clock = pygame.time.Clock()
 
     grid = HexGrid(*HexGrid.compute_grid_size())
-    base_dir = os.path.dirname(__file__)
-    roboto_path = os.path.join(base_dir, FONT_PATH_REGULAR)
-    font_units = pygame.font.Font(roboto_path, FONT_SIZE_UNITS)
-    font_bar = pygame.font.Font(roboto_path, FONT_SIZE_BAR)
-    icon_assets = ui.load_icon_assets(grid.hex_radius, base_dir)
+    font_units = load_font(
+        FONT_PATH_UNITS,
+        FONT_SIZE_UNITS,
+        fallback_family=FONT_NAME_UNITS,
+    )
+    font_bar = load_font(
+        FONT_PATH_REGULAR,
+        FONT_SIZE_BAR,
+        fallback_family=FONT_NAME_BAR,
+    )
+    icon_assets = ui.load_icon_assets(grid.hex_radius)
     icon_radius = grid.hex_radius
     game = HexGame(grid)
 
@@ -38,13 +55,12 @@ def play_game():
 
         game.update(dt_seconds)
         if game.grid.hex_radius != icon_radius:
-            icon_assets = ui.load_icon_assets(game.grid.hex_radius, base_dir)
+            icon_assets = ui.load_icon_assets(game.grid.hex_radius)
             icon_radius = game.grid.hex_radius
         ui.draw(screen, font_units, font_bar, icon_assets, game.grid, game)
         pygame.display.flip()
 
     pygame.quit()
 
-
 if __name__ == "__main__":
-    play_game()
+    play_hex()

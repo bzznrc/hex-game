@@ -1,8 +1,29 @@
 import random
 from collections import deque
-from constants import *
-from hex_grid import HexGrid
 
+from config import (
+    CAMPAIGN_LEVELS,
+    COMBAT_BASE_ATTACKER_CHANCE,
+    COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA,
+    COMBAT_GLOBAL_DEFENDER_BIAS_ATTACKER_DELTA,
+    COMBAT_MAX_ATTACKER_CHANCE,
+    COMBAT_MIN_ATTACKER_CHANCE,
+    COMBAT_MOUNTAIN_DEFENDER_ATTACKER_DELTA,
+    COMBAT_RIVER_CROSSING_ATTACKER_DELTA,
+    CPU_ACTION_DELAY_SECONDS,
+    CPU_DEPLOY_ACTION_DELAY_SECONDS,
+    DEPLOY_CHUNKS_PER_TURN,
+    MAX_MOVEMENT_SOURCE_HEXES,
+    OWNER_CPU,
+    OWNER_PLAYER,
+    PHASE_ATTACK,
+    PHASE_DEPLOYMENT,
+    PHASE_MOVEMENT,
+    TERRAIN_FOREST,
+    TERRAIN_MOUNTAIN,
+    UNITS_PER_DEPLOY_CHUNK,
+)
+from hex_grid import HexGrid
 
 class HexGame:
     def __init__(self, grid):
@@ -621,3 +642,4 @@ class HexGame:
     @staticmethod
     def _side_name(owner):
         return "You" if owner == OWNER_PLAYER else "CPU"
+
