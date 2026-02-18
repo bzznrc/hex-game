@@ -403,7 +403,3 @@ def _troop_text_center(grid, cell, x, y, radius):
 def _scaled_icon_size(radius, scale):
     return max(12, int(round(radius * scale)))
 
-
-# Backward-compatible alias while call sites migrate.
-draw = draw_frame
-
