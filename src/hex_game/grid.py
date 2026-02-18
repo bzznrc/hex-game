@@ -35,17 +35,15 @@ from hex_game.config import (
     TROOP_CAP_PLAIN_FOREST,
     TROOP_CAP_TOWN,
 )
-from hex_game.boards import (
-    axial_to_pixel_odd_q,
+from hex_game.generation import (
     collect_adjacency_edges,
     collect_boundary_coords,
-    compute_best_fit_hex_layout,
     generate_boundary_crossing_edges,
     generate_clustered_regions,
-    neighbor_coords_odd_q,
     normalize_cluster_config,
     normalize_range_config,
 )
+from hex_game.layout import axial_to_pixel_odd_q, compute_best_fit_hex_layout, neighbor_coords_odd_q
 
 class HexCell:
     def __init__(self, q, r):

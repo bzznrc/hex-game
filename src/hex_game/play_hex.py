@@ -18,10 +18,10 @@ from hex_game.config import (
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
 )
+import hex_game.render as ui
+from hex_game.game import HexGame
+from hex_game.grid import HexGrid
 from hex_game.runtime import ArcadeFrameClock, ArcadeWindowController
-from hex_game.core.grid import HexGrid
-from hex_game.core.game import HexGame
-from hex_game.ui import renderer as ui
 
 
 def play_hex():

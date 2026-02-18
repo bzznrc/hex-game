@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 import time
 from typing import Iterable
 
@@ -13,6 +14,15 @@ from pyglet.window import key as pyglet_key
 
 
 _LOADED_FONT_PATHS: set[str] = set()
+
+
+def configure_logging(level: str = "INFO") -> None:
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
 
 def load_font_once(font_path: str | Path) -> None:

@@ -8,6 +8,17 @@ import arcade
 from arcade.types import Color, LBWH
 
 from hex_game.config import (
+    COLOR_AMBER,
+    COLOR_AQUA,
+    COLOR_BRICK_RED,
+    COLOR_CHARCOAL,
+    COLOR_CORAL,
+    COLOR_DEEP_TEAL,
+    COLOR_FOG_GRAY,
+    COLOR_NEAR_BLACK,
+    COLOR_SLATE_GRAY,
+    COLOR_SOFT_WHITE,
+    COLOR_STEEL_BLUE,
     ICON_PATH_CAPITAL,
     ICON_PATH_DANGER,
     ICON_PATH_FOREST,
@@ -38,21 +49,8 @@ from hex_game.config import (
     UI_TOWN_ICON_ALPHA,
     UI_TOWN_ICON_SIZE_SCALE,
 )
+from hex_game.assets import resolve_font_path, resolve_icon_path
 from hex_game.runtime import TextCache, load_font_once
-from hex_game.visual import resolve_font_path, resolve_icon_path
-from hex_game.visual import (
-    COLOR_AMBER,
-    COLOR_AQUA,
-    COLOR_BRICK_RED,
-    COLOR_CHARCOAL,
-    COLOR_CORAL,
-    COLOR_DEEP_TEAL,
-    COLOR_FOG_GRAY,
-    COLOR_NEAR_BLACK,
-    COLOR_SLATE_GRAY,
-    COLOR_SOFT_WHITE,
-    COLOR_STEEL_BLUE,
-)
 
 _TEXTURE_CACHE: dict[str, arcade.Texture] = {}
 _TEXT_CACHE = TextCache(max_entries=4096)

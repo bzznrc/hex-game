@@ -12,11 +12,6 @@ dependencies = [
   "arcade>=3.3.3",
 ]
 
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.0",
-]
-
 [tool.setuptools]
 package-dir = {"" = "src"}
 
@@ -24,7 +19,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-hex_game = ["assets/icons/*.png", "assets/fonts/*.ttf"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+hex_game = ["assets/fonts/*.ttf", "assets/icons/*.png"]

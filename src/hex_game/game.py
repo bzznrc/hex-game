@@ -23,7 +23,7 @@ from hex_game.config import (
     TERRAIN_MOUNTAIN,
     UNITS_PER_DEPLOY_CHUNK,
 )
-from hex_game.core.grid import HexGrid
+from hex_game.grid import HexGrid
 
 class HexGame:
     def __init__(self, grid):
