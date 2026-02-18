@@ -42,10 +42,9 @@ from hex_game.config import (
     UI_RIVER_LINE_WIDTH_DELTA_PX,
     UI_SELECTED_LINE_WIDTH_EXTRA_PX,
     UI_SELECTION_HIGHLIGHT_SCALE,
-    UI_SETTLEMENT_TROOP_Y_OFFSET_SCALE,
     UI_STATUS_SEPARATOR,
+    UI_TERRAIN_ICON_ALPHA,
     UI_TERRAIN_ICON_SIZE_SCALE,
-    UI_TERRAIN_MARKER_Y_OFFSET_SCALE,
     UI_TOWN_ICON_ALPHA,
     UI_TOWN_ICON_SIZE_SCALE,
 )
@@ -87,8 +86,10 @@ def load_icon_assets(hex_radius):
     town_size = _scaled_icon_size(hex_radius, UI_TOWN_ICON_SIZE_SCALE)
     return {
         "terrain": {
-            TERRAIN_FOREST: _icon_entry(ICON_PATH_FOREST, terrain_size),
-            TERRAIN_MOUNTAIN: _icon_entry(ICON_PATH_MOUNTAIN, terrain_size),
+            TERRAIN_FOREST: _icon_entry(ICON_PATH_FOREST, terrain_size, (*COLOR_SOFT_WHITE, int(UI_TERRAIN_ICON_ALPHA))),
+            TERRAIN_MOUNTAIN: _icon_entry(
+                ICON_PATH_MOUNTAIN, terrain_size, (*COLOR_SOFT_WHITE, int(UI_TERRAIN_ICON_ALPHA))
+            ),
         },
         "danger": _icon_entry(ICON_PATH_DANGER, danger_size),
         "capital": {
@@ -135,11 +136,10 @@ def draw_frame(window, font_units, font_bar, icon_assets, grid, game):
 
         troops = cell.total_troops()
         if troops > 0 and not _is_hidden_from_you(cell):
-            text_x, text_y = _troop_text_center(grid, cell, x, y, radius)
             _draw_text(
                 str(troops),
-                text_x,
-                text_y,
+                x,
+                y,
                 _owner_accent_color(cell.owner),
                 int(font_units["size"]),
                 str(font_units["name"]),
@@ -268,8 +268,7 @@ def _draw_terrain_marker(icon_assets, grid, cell, x, y, radius):
     if icon is None:
         return
 
-    marker_y = y + radius * UI_TERRAIN_MARKER_Y_OFFSET_SCALE
-    _draw_icon(icon, x, marker_y)
+    _draw_bottom_anchored_icon(icon, x, _hex_bottom_y(y, radius))
 
 
 def _draw_settlement_marker(icon_assets, grid, cell, x, y):
@@ -296,10 +295,25 @@ def _draw_exposed_icon(icon, x, y, radius):
     _draw_icon(icon, x, icon_y)
 
 
+def _hex_bottom_y(y: float, radius: float) -> float:
+    return y + radius
+
+
 def _draw_icon(icon_entry, center_x: float, center_y: float):
     size = int(icon_entry["size"])
     left = center_x - size / 2
     bottom = _to_arcade_y(center_y) - size / 2
+    arcade.draw_texture_rect(
+        icon_entry["texture"],
+        LBWH(left, bottom, size, size),
+        color=icon_entry["tint"],
+    )
+
+
+def _draw_bottom_anchored_icon(icon_entry, center_x: float, bottom_y: float):
+    size = int(icon_entry["size"])
+    left = center_x - size / 2
+    bottom = _to_arcade_y(bottom_y)
     arcade.draw_texture_rect(
         icon_entry["texture"],
         LBWH(left, bottom, size, size),
@@ -392,12 +406,6 @@ def _owner_accent_color(owner):
 
 def _is_hidden_from_you(cell):
     return cell.owner == OWNER_CPU and cell.terrain == TERRAIN_FOREST
-
-
-def _troop_text_center(grid, cell, x, y, radius):
-    if grid.is_town_coord(cell.q, cell.r):
-        return x, y + radius * UI_SETTLEMENT_TROOP_Y_OFFSET_SCALE
-    return x, y
 
 
 def _scaled_icon_size(radius, scale):
