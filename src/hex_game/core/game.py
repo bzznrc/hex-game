@@ -1,7 +1,7 @@
 import random
 from collections import deque
 
-from config import (
+from hex_game.config import (
     CAMPAIGN_LEVELS,
     COMBAT_BASE_ATTACKER_CHANCE,
     COMBAT_EXPOSED_DEFENDER_ATTACKER_DELTA,
@@ -23,7 +23,7 @@ from config import (
     TERRAIN_MOUNTAIN,
     UNITS_PER_DEPLOY_CHUNK,
 )
-from hex_grid import HexGrid
+from hex_game.core.grid import HexGrid
 
 class HexGame:
     def __init__(self, grid):
@@ -642,4 +642,5 @@ class HexGame:
     @staticmethod
     def _side_name(owner):
         return "You" if owner == OWNER_PLAYER else "CPU"
+
 

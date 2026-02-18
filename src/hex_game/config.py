@@ -1,33 +1,17 @@
 """Configuration values for the Hex strategy project."""
 
-from pathlib import Path
-import sys
-
-# Prefer local project modules when multiple game folders are on sys.path.
-_PROJECT_ROOT = Path(__file__).resolve().parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
-# Allow local workspace runs without installing bgds globally.
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
-_BGDS_SRC = _WORKSPACE_ROOT / "bazza-game-design-system" / "src"
-if _BGDS_SRC.exists() and str(_BGDS_SRC) not in sys.path:
-    sys.path.insert(0, str(_BGDS_SRC))
-
-from bgds.boards.hex import HEX_BOARD_STANDARD, HEX_RENDER_STANDARD
-from bgds.visual.icons import (
-    ICON_PATH_DANGER_24,
-    ICON_PATH_FOREST_24,
-    ICON_PATH_MOUNTAIN_24,
-    ICON_PATH_PAWN_64_FILLED,
-    ICON_PATH_QUEEN_64_FILLED,
-)
-from bgds.visual.typography import (
+from hex_game.boards import HEX_BOARD_STANDARD, HEX_RENDER_STANDARD
+from hex_game.visual import (
     FONT_FAMILY_DEFAULT,
     FONT_PATH_ROBOTO_BOLD,
     FONT_PATH_ROBOTO_REGULAR,
     FONT_SIZE_STATUS_DEFAULT,
     FONT_SIZE_UNIT_DEFAULT,
+    ICON_PATH_DANGER_24,
+    ICON_PATH_FOREST_24,
+    ICON_PATH_MOUNTAIN_24,
+    ICON_PATH_PAWN_64_FILLED,
+    ICON_PATH_QUEEN_64_FILLED,
     STATUS_SEPARATOR_SLASH,
 )
 

@@ -3,7 +3,7 @@ import random
 from collections import deque
 from itertools import combinations
 
-from config import (
+from hex_game.config import (
     BB_HEIGHT,
     CITIES_PER_PLAYER,
     CITY_MIN_FRONTLINE_DISTANCE,
@@ -35,18 +35,16 @@ from config import (
     TROOP_CAP_PLAIN_FOREST,
     TROOP_CAP_TOWN,
 )
-from bgds.boards.hex_generation import (
+from hex_game.boards import (
+    axial_to_pixel_odd_q,
     collect_adjacency_edges,
     collect_boundary_coords,
+    compute_best_fit_hex_layout,
     generate_boundary_crossing_edges,
     generate_clustered_regions,
+    neighbor_coords_odd_q,
     normalize_cluster_config,
     normalize_range_config,
-)
-from bgds.boards.hex_layout import (
-    axial_to_pixel_odd_q,
-    compute_best_fit_hex_layout,
-    neighbor_coords_odd_q,
 )
 
 class HexCell:
@@ -996,4 +994,5 @@ class HexGrid:
     def _neighbor_coords(self, coord):
         q, r = coord
         return [(neighbor.q, neighbor.r) for neighbor in self.get_neighbors(q, r)]
+
 

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hex-game"
+version = "0.1.0"
+description = "Lightweight hex strategy game"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "arcade>=3.3.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hex_game = ["assets/icons/*.png", "assets/fonts/*.ttf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

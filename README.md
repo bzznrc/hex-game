@@ -1,23 +1,28 @@
 # Hex Game
 
-Hex Game is a turn-based strategy roguelike campaign prototype played on a hexagonal map.
-You control the Player side, while the CPU controls the opposing side with simple automated logic.
+Lightweight turn-based hex strategy game with local-only modules and assets.
 
-Each match includes varied terrain (such as rivers and mountains), creating positional choices and tradeoffs.
-The objective is to outmaneuver the CPU and dominate more of the map over the course of each level.
-
-## Shared Design System
-- Visual and board constants are sourced from the sibling Bazza Game Design System package (`bgds` imports).
-- For standalone environments, install it with `pip install -e ../bazza-game-design-system`.
-
-## Install
+## Quickstart
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+. .venv/Scripts/activate
+pip install -e .[dev]
 ```
 
-## Run
+Run:
 ```bash
-python play_hex.py
+python -m hex_game
 ```
 
-Icons are from https://fonts.google.com/icons
+## Structure
+- `src/hex_game/config.py`: central config
+- `src/hex_game/core/`: grid + turn/combat logic
+- `src/hex_game/ui/`: rendering
+- `src/hex_game/boards/`: hex layout and generation helpers
+- `src/hex_game/runtime/`: local runtime helpers
+- `src/hex_game/assets/`: local icons/fonts used by UI
+
+## Tests
+```bash
+pytest
+```

@@ -1,2 +1,1 @@
--e ../bazza-game-design-system
-pygame>=2.5
+arcade>=3.3.3
