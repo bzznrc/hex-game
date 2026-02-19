@@ -8,11 +8,8 @@ import arcade
 
 from hex_game.config import (
     FONT_NAME_BAR,
-    FONT_NAME_UNITS,
     FONT_PATH_REGULAR,
-    FONT_PATH_UNITS,
     FONT_SIZE_BAR,
-    FONT_SIZE_UNITS,
     FPS,
     WINDOW_TITLE,
     SCREEN_HEIGHT,
@@ -39,11 +36,6 @@ def play_hex():
 
     frame_clock = ArcadeFrameClock()
     grid = HexGrid(*HexGrid.compute_grid_size())
-    font_units = ui.load_font_spec(
-        FONT_PATH_UNITS,
-        FONT_SIZE_UNITS,
-        fallback_family=FONT_NAME_UNITS,
-    )
     font_bar = ui.load_font_spec(
         FONT_PATH_REGULAR,
         FONT_SIZE_BAR,
@@ -75,7 +67,7 @@ def play_hex():
             icon_assets = ui.load_icon_assets(game.grid.hex_radius)
             icon_radius = game.grid.hex_radius
 
-        ui.draw_frame(window, font_units, font_bar, icon_assets, game.grid, game)
+        ui.draw_frame(window, font_bar, icon_assets, game.grid, game)
         window_controller.flip()
 
     window_controller.close()
@@ -83,4 +75,3 @@ def play_hex():
 
 if __name__ == "__main__":
     play_hex()
-

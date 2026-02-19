@@ -38,19 +38,19 @@ class HexGame:
         self.campaign_won = False
 
         self.selected_source = None
-        self.deploy_chunks_total = self._deploy_chunks_for(self.active_player)
-        self.deploy_units_total = int(self.deploy_chunks_total) * int(UNITS_PER_DEPLOY_CHUNK)
-        self.deploy_units_remaining = self.deploy_units_total
-        self.deploy_chunks_remaining = self.deploy_chunks_total
+        self.deploy_chunks_total = 0
+        self.deploy_units_total = 0
+        self.deploy_units_remaining = 0
+        self.deploy_chunks_remaining = 0
         self.deploy_placements = {}
         self.movement_sources_used = set()
-        self.attacks_used = 0
         self.last_combat_log = []
         self.cpu_action_delay = float(CPU_ACTION_DELAY_SECONDS)
         self.cpu_deploy_action_delay = float(CPU_DEPLOY_ACTION_DELAY_SECONDS)
         self.cpu_action_queue = deque()
         self.cpu_action_label = ""
         self.cpu_action_timer = 0.0
+        self._reset_deployment_budget()
 
         if self.active_player == OWNER_CPU:
             self._start_cpu_turn()
@@ -162,7 +162,6 @@ class HexGame:
             self.clear_selection()
             return True
 
-        self.attacks_used += 1
         self.clear_selection()
         return True
 
@@ -182,7 +181,6 @@ class HexGame:
                 self._sync_deploy_chunks_remaining()
             self.phase = PHASE_ATTACK
             self.deploy_placements = {}
-            self.attacks_used = 0
             self.last_combat_log = []
             return
 
@@ -224,7 +222,6 @@ class HexGame:
         self._reset_deployment_budget()
         self.deploy_placements = {}
         self.movement_sources_used = set()
-        self.attacks_used = 0
         self.last_combat_log = []
         self.clear_selection()
 
@@ -474,8 +471,16 @@ class HexGame:
         ) // units_per_chunk
 
     def _reset_deployment_budget(self):
-        self.deploy_chunks_total = self._deploy_chunks_for(self.active_player)
-        self.deploy_units_total = int(self.deploy_chunks_total) * int(UNITS_PER_DEPLOY_CHUNK)
+        units_per_chunk = max(1, int(UNITS_PER_DEPLOY_CHUNK))
+        full_chunks = self._deploy_chunks_for(self.active_player)
+        full_units = int(full_chunks) * units_per_chunk
+        if self.turn == 1 and self.active_player == self.first_turn_first_player:
+            self.deploy_units_total = max(1, full_units // 2)
+        else:
+            self.deploy_units_total = full_units
+        self.deploy_chunks_total = (
+            int(self.deploy_units_total) + units_per_chunk - 1
+        ) // units_per_chunk
         self.deploy_units_remaining = self.deploy_units_total
         self._sync_deploy_chunks_remaining()
         self.deploy_placements = {}
@@ -502,7 +507,7 @@ class HexGame:
             if self.grid.can_deploy_to_cell(c.q, c.r, OWNER_CPU)
             and self._deploy_capacity_at(c.q, c.r) > 0
         ]
-        frontline.sort(key=lambda c: self._enemy_pressure(c, OWNER_CPU), reverse=True)
+        frontline.sort(key=self._ai_deploy_priority, reverse=True)
 
         owned = [
             c
@@ -540,7 +545,6 @@ class HexGame:
         if self._resolve_attack(source.q, source.r, target.q, target.r):
             if self.game_over or self.phase != PHASE_ATTACK or self.active_player != OWNER_CPU:
                 return
-            self.attacks_used += 1
             self.clear_selection()
             self.cpu_action_queue.appendleft(("Attack", self._ai_attack_step))
         else:
@@ -575,7 +579,6 @@ class HexGame:
         self.phase = PHASE_DEPLOYMENT
         self._reset_deployment_budget()
         self.movement_sources_used = set()
-        self.attacks_used = 0
         self.last_combat_log = []
         self.clear_selection()
         self.cpu_action_queue.clear()
@@ -609,29 +612,150 @@ class HexGame:
         )
 
     def _pick_ai_attack(self):
-        enemy = self.grid.enemy_of(OWNER_CPU)
-        best = None
-        best_score = None
+        candidates = self._ai_attack_candidates()
+        if not candidates:
+            return None
 
-        for cell in self.grid.get_all_cells():
-            if cell.owner != OWNER_CPU:
+        # If the capital is reasonably vulnerable now, strike it directly.
+        capital_strike = [candidate for candidate in candidates if candidate["is_enemy_capital"] and candidate["win_prob"] >= 0.58]
+        if capital_strike:
+            best = max(
+                capital_strike,
+                key=lambda candidate: (
+                    candidate["win_prob"],
+                    candidate["advantage"],
+                    -candidate["distance_to_enemy_capital"],
+                ),
+            )
+            return best["source"], best["target"]
+
+        # Otherwise prioritize practical town captures to build future deployment advantage.
+        town_push = [candidate for candidate in candidates if candidate["is_enemy_town"] and candidate["win_prob"] >= 0.45]
+        if town_push:
+            best = max(
+                town_push,
+                key=lambda candidate: (
+                    candidate["win_prob"],
+                    candidate["advantage"],
+                    -candidate["distance_to_enemy_capital"],
+                ),
+            )
+            return best["source"], best["target"]
+
+        # Fallback: best local breakthrough based on convenience and strategic direction.
+        best = max(
+            candidates,
+            key=lambda candidate: (
+                candidate["score"],
+                candidate["win_prob"],
+                candidate["advantage"],
+            ),
+        )
+        return best["source"], best["target"]
+
+    def _ai_deploy_priority(self, cell):
+        enemy = self.grid.enemy_of(OWNER_CPU)
+        adjacent_enemies = [
+            neighbor
+            for neighbor in self.grid.get_neighbors(cell.q, cell.r)
+            if neighbor.owner == enemy
+        ]
+        adjacent_capital = any(self.grid.is_capital_coord(neighbor.q, neighbor.r) for neighbor in adjacent_enemies)
+        adjacent_town = any(
+            self.grid.is_town_coord(neighbor.q, neighbor.r) and not self.grid.is_capital_coord(neighbor.q, neighbor.r)
+            for neighbor in adjacent_enemies
+        )
+        pressure = self._enemy_pressure(cell, OWNER_CPU)
+        return (
+            1 if adjacent_capital else 0,
+            1 if adjacent_town else 0,
+            pressure,
+            -cell.troops_of(OWNER_CPU),
+        )
+
+    def _ai_attack_candidates(self):
+        enemy = self.grid.enemy_of(OWNER_CPU)
+        enemy_capital = self.grid.capital_coord(enemy)
+        candidates = []
+
+        for source in self.grid.get_all_cells():
+            if source.owner != OWNER_CPU:
                 continue
-            attacker_troops = cell.troops_of(OWNER_CPU)
+            attacker_troops = source.troops_of(OWNER_CPU)
             if attacker_troops <= 1:
                 continue
 
-            for neighbor in self.grid.get_neighbors(cell.q, cell.r):
-                if neighbor.owner != enemy:
+            for target in self.grid.get_neighbors(source.q, source.r):
+                if target.owner != enemy:
                     continue
-                defender_troops = self._visible_enemy_troops(OWNER_CPU, neighbor)
-                if attacker_troops <= defender_troops:
-                    continue
-                score = (attacker_troops - defender_troops, defender_troops)
-                if best is None or score > best_score:
-                    best = (cell, neighbor)
-                    best_score = score
 
-        return best
+                defender_troops = max(0, int(self._visible_enemy_troops(OWNER_CPU, target)))
+                crossing_river = self._is_river_crossing(source, target)
+                topology = self.grid.frontline_topology(target.q, target.r)
+                attacker_round_chance, _ = self._attacker_round_chance(
+                    crossing_river,
+                    target.terrain,
+                    topology,
+                )
+                win_prob = self._attack_win_probability(
+                    attacker_troops=attacker_troops,
+                    defender_troops=defender_troops,
+                    attacker_round_chance=attacker_round_chance,
+                )
+                distance_to_enemy_capital = (
+                    HexGrid._hex_distance((target.q, target.r), enemy_capital)
+                    if enemy_capital is not None
+                    else 0
+                )
+                is_enemy_capital = self.grid.is_capital_coord(target.q, target.r)
+                is_enemy_town = self.grid.is_town_coord(target.q, target.r) and not is_enemy_capital
+                assumed_defenders = max(1, defender_troops)
+                advantage = attacker_troops - assumed_defenders
+
+                score = (
+                    win_prob * 100.0
+                    + advantage * 6.0
+                    - distance_to_enemy_capital * 1.2
+                    + (20.0 if is_enemy_capital else 0.0)
+                    + (8.0 if is_enemy_town else 0.0)
+                )
+
+                candidates.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "win_prob": win_prob,
+                        "advantage": advantage,
+                        "distance_to_enemy_capital": distance_to_enemy_capital,
+                        "is_enemy_capital": is_enemy_capital,
+                        "is_enemy_town": is_enemy_town,
+                        "score": score,
+                    }
+                )
+
+        return candidates
+
+    @staticmethod
+    def _attack_win_probability(attacker_troops, defender_troops, attacker_round_chance):
+        attacker = max(0, int(attacker_troops))
+        defender = max(0, int(defender_troops))
+        if defender <= 0:
+            return 1.0
+        if attacker <= 0:
+            return 0.0
+
+        p = max(0.0, min(1.0, float(attacker_round_chance)))
+        dp = [[0.0 for _ in range(defender + 1)] for _ in range(attacker + 1)]
+        for a in range(attacker + 1):
+            dp[a][0] = 1.0
+        for d in range(1, defender + 1):
+            dp[0][d] = 0.0
+
+        for a in range(1, attacker + 1):
+            for d in range(1, defender + 1):
+                dp[a][d] = p * dp[a][d - 1] + (1.0 - p) * dp[a - 1][d]
+
+        return dp[attacker][defender]
 
     def _visible_enemy_troops(self, observer, enemy_cell):
         if enemy_cell.terrain == TERRAIN_FOREST:

@@ -95,7 +95,7 @@ class HexGrid:
         self.boundary_edges = set()
         # River representation: edges between adjacent cells.
         self.river_edges = set()
-        # Cached coordinates of cells in fully encircled owner groups.
+        # Cached coordinates of owner cells disconnected from their own capital.
         self._encircled_cells_cache = None
         # Cached in-supply cells by owner (connected to own capital).
         self._supply_reach_cache = {}
@@ -723,40 +723,17 @@ class HexGrid:
         if self._encircled_cells_cache is not None:
             return self._encircled_cells_cache
 
+        # A cell is encircled if it cannot trace a same-owner path to its own capital.
+        # This reuses supply reach, which already computes owner-connected components from capital.
         encircled = set()
-        visited = set()
-        for cell in self.get_all_cells():
-            start = (cell.q, cell.r)
-            if start in visited or not self._is_player_owner(cell.owner):
-                continue
-
-            owner = cell.owner
-            enemy = self.enemy_of(owner)
-            group = set()
-            stack = [start]
-            visited.add(start)
-            surrounded = True
-
-            while stack:
-                q, r = stack.pop()
-                group.add((q, r))
-                neighbors = self.get_neighbors(q, r)
-
-                # Border contact means the group is not fully enclosed by enemies.
-                if len(neighbors) < 6:
-                    surrounded = False
-
-                for neighbor in neighbors:
-                    coord = (neighbor.q, neighbor.r)
-                    if neighbor.owner == owner:
-                        if coord not in visited:
-                            visited.add(coord)
-                            stack.append(coord)
-                    elif neighbor.owner != enemy:
-                        surrounded = False
-
-            if surrounded:
-                encircled.update(group)
+        for owner in (OWNER_PLAYER, OWNER_CPU):
+            owner_supply = self._capital_supply_reach(owner)
+            for cell in self.get_all_cells():
+                if cell.owner != owner:
+                    continue
+                coord = (cell.q, cell.r)
+                if coord not in owner_supply:
+                    encircled.add(coord)
 
         self._encircled_cells_cache = encircled
         return encircled

@@ -24,15 +24,20 @@ from hex_game.config import (
     ICON_PATH_FOREST,
     ICON_PATH_MOUNTAIN,
     ICON_PATH_TOWN,
+    MAX_MOVEMENT_SOURCE_HEXES,
     OWNER_CPU,
     OWNER_PLAYER,
     PHASE_ATTACK,
     PHASE_DEPLOYMENT,
+    PHASE_MOVEMENT,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
     TERRAIN_FOREST,
     TERRAIN_MOUNTAIN,
-    UI_CAPITAL_ICON_ALPHA,
+    TROOP_CAP_MOUNTAIN,
+    TROOP_CAP_PLAIN_FOREST,
+    TROOP_CAP_TOWN,
+    UI_FEATURE_ICON_ALPHA,
     UI_CAPITAL_ICON_SIZE_SCALE,
     UI_EDGE_HALF_LENGTH_RATIO,
     UI_EXPOSED_ICON_SIZE_SCALE,
@@ -43,9 +48,11 @@ from hex_game.config import (
     UI_SELECTED_LINE_WIDTH_EXTRA_PX,
     UI_SELECTION_HIGHLIGHT_SCALE,
     UI_STATUS_SEPARATOR,
-    UI_TERRAIN_ICON_ALPHA,
     UI_TERRAIN_ICON_SIZE_SCALE,
-    UI_TOWN_ICON_ALPHA,
+    UI_TROOP_DOT_OUTLINE_WIDTH_SCALE,
+    UI_TROOP_DOT_RADIUS_SCALE,
+    UI_TROOP_DOT_SEGMENTS,
+    UI_TROOP_LAYOUT_SCALE,
     UI_TOWN_ICON_SIZE_SCALE,
 )
 from hex_game.assets import resolve_font_path, resolve_icon_path
@@ -54,6 +61,16 @@ from hex_game.runtime import TextCache, load_font_once
 _TEXTURE_CACHE: dict[str, arcade.Texture] = {}
 _TEXT_CACHE = TextCache(max_entries=4096)
 _HEX_GEOMETRY_CACHE: dict[tuple[int, int, int, int], dict[tuple[int, int], dict[str, object]]] = {}
+_TROOP_DOT_MIN_RADIUS_PX = 2.0
+_TROOP_DOT_OUTLINE_MIN_WIDTH_PX = 1
+_TROOP_DOT_OUTLINE_ALPHA = 220
+_TROOP_TRIANGLE_GROUP_SIZE = 3
+_TROOP_TRIANGLE_DX_FROM_DOT_SCALE = 2.18
+_TROOP_TRIANGLE_DY_FROM_DOT_SCALE = 1.95
+_TROOP_GROUP_STEP_FROM_DX_SCALE = 1.50
+_TROOP_TRIANGLE_DX_RADIUS_SCALE = 0.195
+_TROOP_TRIANGLE_DY_RADIUS_SCALE = 0.185
+_TROOP_GROUP_STEP_RADIUS_SCALE = 0.43
 
 
 def load_font_spec(font_path_or_file: str, size_px: int, fallback_family: str | None = None) -> dict[str, object]:
@@ -86,24 +103,24 @@ def load_icon_assets(hex_radius):
     town_size = _scaled_icon_size(hex_radius, UI_TOWN_ICON_SIZE_SCALE)
     return {
         "terrain": {
-            TERRAIN_FOREST: _icon_entry(ICON_PATH_FOREST, terrain_size, (*COLOR_SOFT_WHITE, int(UI_TERRAIN_ICON_ALPHA))),
+            TERRAIN_FOREST: _icon_entry(ICON_PATH_FOREST, terrain_size, (*COLOR_SOFT_WHITE, int(UI_FEATURE_ICON_ALPHA))),
             TERRAIN_MOUNTAIN: _icon_entry(
-                ICON_PATH_MOUNTAIN, terrain_size, (*COLOR_SOFT_WHITE, int(UI_TERRAIN_ICON_ALPHA))
+                ICON_PATH_MOUNTAIN, terrain_size, (*COLOR_SOFT_WHITE, int(UI_FEATURE_ICON_ALPHA))
             ),
         },
         "danger": _icon_entry(ICON_PATH_DANGER, danger_size),
         "capital": {
-            OWNER_PLAYER: _icon_entry(ICON_PATH_CAPITAL, capital_size, (*COLOR_AQUA, int(UI_CAPITAL_ICON_ALPHA))),
-            OWNER_CPU: _icon_entry(ICON_PATH_CAPITAL, capital_size, (*COLOR_CORAL, int(UI_CAPITAL_ICON_ALPHA))),
+            OWNER_PLAYER: _icon_entry(ICON_PATH_CAPITAL, capital_size, (*COLOR_AQUA, int(UI_FEATURE_ICON_ALPHA))),
+            OWNER_CPU: _icon_entry(ICON_PATH_CAPITAL, capital_size, (*COLOR_CORAL, int(UI_FEATURE_ICON_ALPHA))),
         },
         "town": {
-            OWNER_PLAYER: _icon_entry(ICON_PATH_TOWN, town_size, (*COLOR_AQUA, int(UI_TOWN_ICON_ALPHA))),
-            OWNER_CPU: _icon_entry(ICON_PATH_TOWN, town_size, (*COLOR_CORAL, int(UI_TOWN_ICON_ALPHA))),
+            OWNER_PLAYER: _icon_entry(ICON_PATH_TOWN, town_size, (*COLOR_AQUA, int(UI_FEATURE_ICON_ALPHA))),
+            OWNER_CPU: _icon_entry(ICON_PATH_TOWN, town_size, (*COLOR_CORAL, int(UI_FEATURE_ICON_ALPHA))),
         },
     }
 
 
-def draw_frame(window, font_units, font_bar, icon_assets, grid, game):
+def draw_frame(window, font_bar, icon_assets, grid, game):
     window.clear(COLOR_CHARCOAL)
     radius = grid.hex_radius
     line_width = _grid_line_width()
@@ -134,16 +151,8 @@ def draw_frame(window, font_units, font_bar, icon_assets, grid, game):
             selected = _scaled_hex_points(points, x, y, UI_SELECTION_HIGHLIGHT_SCALE)
             arcade.draw_polygon_outline(_to_arcade_points(selected), COLOR_AMBER, selected_line_width)
 
-        troops = cell.total_troops()
-        if troops > 0 and not _is_hidden_from_you(cell):
-            _draw_text(
-                str(troops),
-                x,
-                y,
-                _owner_accent_color(cell.owner),
-                int(font_units["size"]),
-                str(font_units["name"]),
-            )
+        if not _is_hidden_from_you(cell):
+            _draw_troop_markers(grid, cell, x, y, radius)
 
     _draw_rivers(grid, line_width)
     draw_bottom_bar(font_bar, grid, game)
@@ -153,9 +162,16 @@ def draw_bottom_bar(font, grid, game):
     player_text = "You" if game.active_player == OWNER_PLAYER else "CPU"
     active_player_color = COLOR_AQUA if game.active_player == OWNER_PLAYER else COLOR_CORAL
     player_area, cpu_area = grid.count_control()
-    arcade.draw_lbwh_rectangle_filled(0, 0, SCREEN_WIDTH, grid.bottom_bar_height, COLOR_NEAR_BLACK)
+    arcade.draw_lbwh_rectangle_filled(
+        0,
+        0,
+        SCREEN_WIDTH,
+        grid.bottom_bar_height,
+        COLOR_NEAR_BLACK,
+    )
 
     separator = UI_STATUS_SEPARATOR if UI_STATUS_SEPARATOR else " / "
+    action_status = _phase_status_text(game)
     segments = [
         (f"L: {game.level}", COLOR_SOFT_WHITE),
         (separator, COLOR_SOFT_WHITE),
@@ -163,7 +179,7 @@ def draw_bottom_bar(font, grid, game):
         (separator, COLOR_SOFT_WHITE),
         (player_text, active_player_color),
         (separator, COLOR_SOFT_WHITE),
-        (_phase_status_text(game), COLOR_SOFT_WHITE),
+        (action_status, COLOR_SOFT_WHITE),
         (separator, COLOR_SOFT_WHITE),
         (f"{player_area}", COLOR_AQUA),
         (separator, COLOR_SOFT_WHITE),
@@ -215,18 +231,21 @@ def get_cell_under_pixel(grid, px, py):
 
 def _phase_status_text(game):
     if getattr(game, "game_over", False):
-        if getattr(game, "campaign_won", False):
-            return "Campaign Won"
-        return "Game Over"
+        return "Campaign Won" if getattr(game, "campaign_won", False) else "Game Over"
+
     if game.phase == PHASE_DEPLOYMENT:
-        if hasattr(game, "deploy_units_total") and hasattr(game, "deploy_units_remaining"):
-            used = game.deploy_units_total - game.deploy_units_remaining
-            return f"Deploy {used}/{game.deploy_units_total}"
-        used = game.deploy_chunks_total - game.deploy_chunks_remaining
-        return f"Deploy {used}/{game.deploy_chunks_total}"
+        deploy_remaining = int(getattr(game, "deploy_units_remaining", 0))
+        deploy_total = int(getattr(game, "deploy_units_total", 0))
+        return f"Deploy: {deploy_remaining}/{deploy_total}"
+
     if game.phase == PHASE_ATTACK:
-        return f"Attack {game.attacks_used}"
-    return "Move"
+        return "Attack"
+
+    if game.phase == PHASE_MOVEMENT:
+        move_used = len(getattr(game, "movement_sources_used", ()))
+        return f"Move: {move_used}/{int(MAX_MOVEMENT_SOURCE_HEXES)}"
+
+    return str(game.phase)
 
 
 def _draw_rivers(grid, grid_line_width):
@@ -321,19 +340,6 @@ def _draw_bottom_anchored_icon(icon_entry, center_x: float, bottom_y: float):
     )
 
 
-def _draw_text(text: str, x: float, y: float, color, size: int, font_name: str):
-    _TEXT_CACHE.draw(
-        text=text,
-        x=x,
-        y=_to_arcade_y(y),
-        color=color,
-        font_size=size,
-        font_name=font_name,
-        anchor_x="center",
-        anchor_y="center",
-    )
-
-
 def _to_arcade_y(y_top: float) -> float:
     return SCREEN_HEIGHT - y_top
 
@@ -406,6 +412,94 @@ def _owner_accent_color(owner):
 
 def _is_hidden_from_you(cell):
     return cell.owner == OWNER_CPU and cell.terrain == TERRAIN_FOREST
+
+
+def _draw_troop_markers(grid, cell, center_x: float, center_y: float, radius: float):
+    display_cap = _display_troop_cap(grid, cell)
+    troops = min(max(0, int(cell.total_troops())), display_cap)
+    if troops <= 0:
+        return
+
+    dot_radius = max(_TROOP_DOT_MIN_RADIUS_PX, radius * float(UI_TROOP_DOT_RADIUS_SCALE))
+    dot_positions = _troop_dot_layout(center_x, center_y, radius, display_cap, dot_radius)
+    filled_color = _owner_accent_color(cell.owner)
+    outline_width = max(
+        _TROOP_DOT_OUTLINE_MIN_WIDTH_PX,
+        int(round(dot_radius * float(UI_TROOP_DOT_OUTLINE_WIDTH_SCALE))),
+    )
+    dot_segments = int(UI_TROOP_DOT_SEGMENTS)
+
+    for index, (dot_x, dot_y) in enumerate(dot_positions):
+        if index >= troops:
+            continue
+        arcade_y = _to_arcade_y(dot_y)
+        arcade.draw_circle_filled(dot_x, arcade_y, dot_radius, filled_color, num_segments=dot_segments)
+        arcade.draw_circle_outline(
+            dot_x,
+            arcade_y,
+            dot_radius,
+            (*COLOR_CHARCOAL, _TROOP_DOT_OUTLINE_ALPHA),
+            border_width=outline_width,
+            num_segments=dot_segments,
+        )
+
+
+def _display_troop_cap(grid, cell) -> int:
+    cap = int(grid.troop_cap_at(cell.q, cell.r))
+    if cap <= int(TROOP_CAP_MOUNTAIN):
+        return int(TROOP_CAP_MOUNTAIN)
+    if cap <= int(TROOP_CAP_PLAIN_FOREST):
+        return int(TROOP_CAP_PLAIN_FOREST)
+    return int(TROOP_CAP_TOWN)
+
+
+def _troop_dot_layout(center_x: float, center_y: float, hex_radius: float, display_cap: int, dot_radius: float):
+    groups = max(1, int(display_cap) // _TROOP_TRIANGLE_GROUP_SIZE)
+    layout_scale = float(UI_TROOP_LAYOUT_SCALE)
+    triangle_dx = max(
+        dot_radius * _TROOP_TRIANGLE_DX_FROM_DOT_SCALE,
+        hex_radius * _TROOP_TRIANGLE_DX_RADIUS_SCALE * layout_scale,
+    )
+    triangle_dy = max(
+        dot_radius * _TROOP_TRIANGLE_DY_FROM_DOT_SCALE,
+        hex_radius * _TROOP_TRIANGLE_DY_RADIUS_SCALE * layout_scale,
+    )
+    group_step = max(
+        triangle_dx * _TROOP_GROUP_STEP_FROM_DX_SCALE,
+        hex_radius * _TROOP_GROUP_STEP_RADIUS_SCALE * layout_scale,
+    )
+    first_group_center_x = center_x - ((groups - 1) * group_step) / 2.0
+
+    positions: list[tuple[float, float]] = []
+    for group_index in range(groups):
+        group_center_x = first_group_center_x + group_index * group_step
+        upside_down = groups > 1 and group_index % 2 == 0
+        positions.extend(_triangle_dot_positions(group_center_x, center_y, triangle_dx, triangle_dy, upside_down))
+
+    return positions
+
+
+def _triangle_dot_positions(
+    center_x: float,
+    center_y: float,
+    triangle_dx: float,
+    triangle_dy: float,
+    upside_down: bool,
+):
+    if upside_down:
+        offsets = (
+            (-triangle_dx / 2.0, -triangle_dy / 2.0),
+            (triangle_dx / 2.0, -triangle_dy / 2.0),
+            (0.0, triangle_dy / 2.0),
+        )
+    else:
+        offsets = (
+            (-triangle_dx / 2.0, triangle_dy / 2.0),
+            (triangle_dx / 2.0, triangle_dy / 2.0),
+            (0.0, -triangle_dy / 2.0),
+        )
+
+    return [(center_x + dx, center_y + dy) for dx, dy in offsets]
 
 
 def _scaled_icon_size(radius, scale):
